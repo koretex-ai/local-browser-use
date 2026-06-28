@@ -1,0 +1,13 @@
+# OS / editor
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Phase-0 raw run artifacts (summary lives in RESULTS.md)
+phase0/out/
+
+# Local scratch / engines
+scratchpad/
+*.tgz

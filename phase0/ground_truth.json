@@ -1,0 +1,33 @@
+{
+  "viewport": {"w": 1280, "h": 800},
+  "cases": [
+    {
+      "id": "search",
+      "instruction": "Click the Search button.",
+      "target": "the blue Search button",
+      "bbox": [830, 360, 940, 408],
+      "note": "single clear target"
+    },
+    {
+      "id": "login",
+      "instruction": "Click the Sign in button.",
+      "target": "the green Sign in button",
+      "bbox": [540, 470, 740, 516],
+      "note": "form with two inputs above"
+    },
+    {
+      "id": "cookie",
+      "instruction": "Click the Reject button to decline non-essential cookies.",
+      "target": "the Reject button (NOT Accept all)",
+      "bbox": [980, 720, 1090, 762],
+      "note": "distractor: Accept all sits to its right"
+    },
+    {
+      "id": "products",
+      "instruction": "Click the 'Add to cart' button for the second product (Nimbus Keyboard).",
+      "target": "Add to cart under the middle product card",
+      "bbox": [500, 520, 700, 564],
+      "note": "two distractor Add to cart buttons (1st and 3rd cards)"
+    }
+  ]
+}

@@ -1,0 +1,547 @@
+[
+  {
+    "model": "qwen3.5:4b",
+    "accuracy": 90.5,
+    "pass": 38,
+    "total": 42,
+    "parseFailures": 0,
+    "medianMs": 2466,
+    "p90Ms": 2926,
+    "failures": [
+      {
+        "case": "respond-pure-chat",
+        "trial": 0,
+        "got": {
+          "reasoning": "Navigate directly to a search engine or knowledge base for an instant answer.",
+          "action": "navigate",
+          "url": "https://www.google.com/search?q=difference+between+RAM+and+SSD"
+        }
+      },
+      {
+        "case": "respond-pure-chat",
+        "trial": 1,
+        "got": {
+          "reasoning": "Navigate directly to a search engine or knowledge base to find an accurate comparison between RAM and SSD.",
+          "action": "navigate",
+          "url": "https://www.google.com"
+        }
+      },
+      {
+        "case": "respond-pure-chat",
+        "trial": 2,
+        "got": {
+          "reasoning": "The current page is unrelated to the task, so I need to navigate directly to a search engine.",
+          "action": "navigate",
+          "url": "https://www.google.com"
+        }
+      },
+      {
+        "case": "pagination",
+        "trial": 0,
+        "got": {
+          "reasoning": "Click page 2 link to go directly there",
+          "action": "click",
+          "index": 1
+        }
+      }
+    ]
+  },
+  {
+    "model": "qwen3.5:2b",
+    "accuracy": 57.1,
+    "pass": 24,
+    "total": 42,
+    "parseFailures": 0,
+    "medianMs": 2332,
+    "p90Ms": 2620,
+    "failures": [
+      {
+        "case": "done-extract-answer",
+        "trial": 0,
+        "got": {
+          "reasoning": "The user wants to know the price of the basic plan, which is visible as a button labeled 'Basic — $9/month'.",
+          "action": "click",
+          "index": 1,
+          "text": "",
+          "url": "https://example-company.com/pricing",
+          "direction": "",
+          "message": "I have clicked on the Basic plan button to reveal its price details."
+        }
+      },
+      {
+        "case": "done-extract-answer",
+        "trial": 1,
+        "got": {
+          "reasoning": "The user wants to know the price of the basic plan, which is visible as a button labeled 'Basic — $9/month' at index 1.",
+          "action": "click",
+          "index": 1,
+          "text": "",
+          "url": "https://example-company.com/pricing",
+          "direction": "",
+          "message": "The basic plan costs $9 per month. The price is clearly displayed on the page."
+        }
+      },
+      {
+        "case": "done-extract-answer",
+        "trial": 2,
+        "got": {
+          "reasoning": "The user wants to find the price of the basic plan, which is visible as a button labeled 'Basic — $9/month'.",
+          "action": "click",
+          "index": 1,
+          "text": "",
+          "url": "https://example-company.com/pricing",
+          "direction": "",
+          "message": "I have clicked on the Basic plan button to reveal its price details."
+        }
+      },
+      {
+        "case": "respond-pure-chat",
+        "trial": 0,
+        "got": {
+          "reasoning": "The user wants to know the difference between RAM and an SSD, but this information is not visible on the current Hacker News page.",
+          "action": "navigate",
+          "index": null,
+          "text": "",
+          "url": "https://en.wikipedia.org/wiki/Random-access_memory#RAM_and_SSDs",
+          "direction": "",
+          "message": "Navigate to a Wikipedia article that explains the difference between RAM and an SSD."
+        }
+      },
+      {
+        "case": "respond-pure-chat",
+        "trial": 1,
+        "got": {
+          "reasoning": "The user wants to know the difference between RAM and an SSD, but this information is not visible on the current Hacker News page.",
+          "action": "navigate",
+          "index": null,
+          "text": "",
+          "url": "https://en.wikipedia.org/wiki/Random-access_memory#RAM_and_SSDs",
+          "direction": "",
+          "message": ""
+        }
+      },
+      {
+        "case": "respond-pure-chat",
+        "trial": 2,
+        "got": {
+          "reasoning": "The user wants to know the difference between RAM and an SSD, but this information is not visible on the current Hacker News page.",
+          "action": "navigate",
+          "index": null,
+          "text": "",
+          "url": "https://en.wikipedia.org/wiki/Random-access_memory#RAM_and_SSDs",
+          "direction": "",
+          "message": "Navigate to a Wikipedia article that explains the difference between RAM and an SSD."
+        }
+      },
+      {
+        "case": "back-recovery",
+        "trial": 0,
+        "got": {
+          "reasoning": "The user wants to navigate back to search results, but since we are on a 404 page with no visible links or buttons for navigation, I will scroll down to see if there is any other content below.",
+          "action": "scroll",
+          "direction": "down"
+        }
+      },
+      {
+        "case": "back-recovery",
+        "trial": 1,
+        "got": {
+          "reasoning": "The user wants to go back to search results and try another link, but currently on a 404 page with no visible links or buttons.",
+          "action": "navigate",
+          "index": null,
+          "text": "",
+          "url": "https://www.google.com",
+          "direction": "up",
+          "message": "The current URL is https://example.com/broken. Since the user wants to go back and try a different link but there are no visible links on this page, I will navigate directly to Google (a common alternative) as it's likely what they intended or need."
+        }
+      },
+      {
+        "case": "back-recovery",
+        "trial": 2,
+        "got": {
+          "reasoning": "The user wants to navigate back to search results, but since they are on a 404 page and need to try another link, clicking 'Report a problem' is the logical step.",
+          "action": "click",
+          "index": 1,
+          "text": "",
+          "url": "https://example.com/broken",
+          "direction": "",
+          "message": ""
+        }
+      },
+      {
+        "case": "form-fill-email",
+        "trial": 0,
+        "got": {
+          "reasoning": "The user needs to enter an email into field [0] and then click button [3].",
+          "action": "type",
+          "index": 0,
+          "text": "john@example.com",
+          "url": "https://blog.example.com",
+          "direction": "",
+          "message": ""
+        }
+      },
+      {
+        "case": "form-fill-email",
+        "trial": 1,
+        "got": {
+          "reasoning": "The user needs to enter an email into field [0] and then click button [3].",
+          "action": "type",
+          "index": 0,
+          "text": "john@example.com",
+          "url": "https://blog.example.com",
+          "direction": "",
+          "message": ""
+        }
+      },
+      {
+        "case": "form-fill-email",
+        "trial": 2,
+        "got": {
+          "reasoning": "The user needs to enter an email into field [0] and then click button [3].",
+          "action": "type",
+          "index": 0,
+          "text": "john@example.com",
+          "url": "https://blog.example.com",
+          "direction": "",
+          "message": ""
+        }
+      },
+      {
+        "case": "cookie-banner",
+        "trial": 0,
+        "got": {
+          "reasoning": "The user wants to search for wireless headphones, and there is a visible 'Search' button at index 4.",
+          "action": "click",
+          "index": 4,
+          "text": "",
+          "url": "https://shop.example.com",
+          "direction": "",
+          "message": ""
+        }
+      },
+      {
+        "case": "cookie-banner",
+        "trial": 1,
+        "got": {
+          "reasoning": "The user wants to search for wireless headphones, and there is a visible 'Search' button at index 4.",
+          "action": "click",
+          "index": 4,
+          "text": "",
+          "url": "https://shop.example.com",
+          "direction": "",
+          "message": ""
+        }
+      },
+      {
+        "case": "cookie-banner",
+        "trial": 2,
+        "got": {
+          "reasoning": "The user wants to search for wireless headphones, and there is a visible 'Search' button at index 4.",
+          "action": "click",
+          "index": 4,
+          "text": "",
+          "url": "https://shop.example.com",
+          "direction": "",
+          "message": ""
+        }
+      },
+      {
+        "case": "pagination",
+        "trial": 0,
+        "got": {
+          "reasoning": "The user wants to navigate to page 2 of search results, which is indicated by element [1] in the list.",
+          "action": "click",
+          "index": 1,
+          "text": "",
+          "url": "https://forum.example.com/search?q=gpu&page=2",
+          "direction": "",
+          "message": "Navigated to page 2 of the GPU search results."
+        }
+      },
+      {
+        "case": "pagination",
+        "trial": 1,
+        "got": {
+          "reasoning": "The user wants to navigate to page 2 of search results, and element [1] is a link labeled 'Thread: GPU prices dropping' which likely represents page 2.",
+          "action": "click",
+          "index": 1,
+          "text": "",
+          "url": "https://forum.example.com/search?q=gpu&page=2",
+          "direction": "",
+          "message": "Navigated to the second search result thread."
+        }
+      },
+      {
+        "case": "pagination",
+        "trial": 2,
+        "got": {
+          "reasoning": "The user wants to navigate to page 2 of search results, but there is no explicit 'Page X' link visible; however, element [1] and [3] are numbered links that likely correspond to pages.",
+          "action": "click",
+          "index": 1,
+          "text": "",
+          "url": "https://forum.example.com/search?q=gpu&page=2",
+          "direction": null,
+          "message": "Navigating to page 2 of the search results."
+        }
+      }
+    ]
+  },
+  {
+    "model": "granite4:3b",
+    "accuracy": 57.1,
+    "pass": 24,
+    "total": 42,
+    "parseFailures": 0,
+    "medianMs": 1036,
+    "p90Ms": 1297,
+    "failures": [
+      {
+        "case": "start-navigate",
+        "trial": 0,
+        "got": {
+          "reasoning": "Search for AirPods Pro on Amazon to find current price",
+          "action": "type",
+          "index": 0,
+          "text": "AirPods Pro Amazon",
+          "message": ""
+        }
+      },
+      {
+        "case": "start-navigate",
+        "trial": 1,
+        "got": {
+          "reasoning": "Search for AirPods Pro on Amazon to find current price",
+          "action": "type",
+          "index": 0,
+          "text": "AirPods Pro Amazon",
+          "message": ""
+        }
+      },
+      {
+        "case": "start-navigate",
+        "trial": 2,
+        "got": {
+          "reasoning": "Search for AirPods Pro on Amazon to find current price",
+          "action": "type",
+          "index": 0,
+          "text": "AirPods Pro Amazon",
+          "message": ""
+        }
+      },
+      {
+        "case": "scroll-when-missing",
+        "trial": 0,
+        "got": {
+          "reasoning": "The 'Contact us' link is not present in the page elements, so I need to navigate to a URL that likely contains it.",
+          "action": "navigate",
+          "url": "https://example-company.com/contact",
+          "message": ""
+        }
+      },
+      {
+        "case": "scroll-when-missing",
+        "trial": 1,
+        "got": {
+          "reasoning": "The 'Contact us' link is not present on the current page, so I need to navigate to a different URL that might contain it.",
+          "action": "navigate",
+          "url": "https://example-company.com/contact",
+          "message": ""
+        }
+      },
+      {
+        "case": "scroll-when-missing",
+        "trial": 2,
+        "got": {
+          "reasoning": "The 'Contact us' link is not present in the page elements, so I need to navigate to a URL that likely contains it.",
+          "action": "navigate",
+          "url": "https://example-company.com/contact",
+          "message": ""
+        }
+      },
+      {
+        "case": "done-extract-answer",
+        "trial": 0,
+        "got": {
+          "reasoning": "The price is listed under each pricing option",
+          "action": "click",
+          "index": 1,
+          "message": "$9/month"
+        }
+      },
+      {
+        "case": "done-extract-answer",
+        "trial": 1,
+        "got": {
+          "reasoning": "The price is listed under each pricing option",
+          "action": "click",
+          "index": 1,
+          "message": "$9/month"
+        }
+      },
+      {
+        "case": "done-extract-answer",
+        "trial": 2,
+        "got": {
+          "reasoning": "The price is listed under each pricing option",
+          "action": "click",
+          "index": 1,
+          "message": "$9/month"
+        }
+      },
+      {
+        "case": "respond-pure-chat",
+        "trial": 0,
+        "got": {
+          "reasoning": "The current page is Hacker News, which doesn't contain information about RAM or SSDs.",
+          "action": "navigate",
+          "url": "https://en.wikipedia.org/wiki/Random_access_memory"
+        }
+      },
+      {
+        "case": "respond-pure-chat",
+        "trial": 1,
+        "got": {
+          "reasoning": "The current page is Hacker News, which doesn't contain information about RAM or SSDs.",
+          "action": "navigate",
+          "url": "https://en.wikipedia.org/wiki/Random_access_memory"
+        }
+      },
+      {
+        "case": "respond-pure-chat",
+        "trial": 2,
+        "got": {
+          "reasoning": "The current page is Hacker News, which doesn't contain information about RAM or SSDs.",
+          "action": "navigate",
+          "url": "https://en.wikipedia.org/wiki/Random_access_memory"
+        }
+      },
+      {
+        "case": "back-recovery",
+        "trial": 0,
+        "got": {
+          "reasoning": "Scroll to see more links on the page",
+          "action": "scroll",
+          "index": 0,
+          "direction": "down"
+        }
+      },
+      {
+        "case": "back-recovery",
+        "trial": 1,
+        "got": {
+          "reasoning": "Scroll to see more links on the page",
+          "action": "scroll",
+          "index": 0,
+          "direction": "down"
+        }
+      },
+      {
+        "case": "back-recovery",
+        "trial": 2,
+        "got": {
+          "reasoning": "Scroll to see more links",
+          "action": "scroll",
+          "index": 0,
+          "direction": "down"
+        }
+      },
+      {
+        "case": "form-fill-email",
+        "trial": 0,
+        "got": {
+          "reasoning": "Type the provided email into the email field and click the subscribe button to complete the subscription.",
+          "action": "click",
+          "index": 3,
+          "text": "john@example.com"
+        }
+      },
+      {
+        "case": "form-fill-email",
+        "trial": 1,
+        "got": {
+          "reasoning": "Type the provided email into the email field and click the subscribe button to complete the subscription.",
+          "action": "click",
+          "index": 3,
+          "text": "john@example.com"
+        }
+      },
+      {
+        "case": "form-fill-email",
+        "trial": 2,
+        "got": {
+          "reasoning": "Type the provided email into the email field and click the subscribe button to complete the subscription.",
+          "action": "click",
+          "index": 3,
+          "text": "john@example.com"
+        }
+      }
+    ]
+  },
+  {
+    "model": "qwen3:4b",
+    "accuracy": 85.7,
+    "pass": 36,
+    "total": 42,
+    "parseFailures": 0,
+    "medianMs": 2050,
+    "p90Ms": 2629,
+    "failures": [
+      {
+        "case": "start-navigate",
+        "trial": 2,
+        "got": {
+          "reasoning": "The user wants to find the current price of AirPods Pro on Amazon. Starting from the Chrome New Tab page, I need to navigate to Amazon first. The current page has a search input where I can type 'Amazon' to go there.",
+          "action": "type",
+          "index": 0,
+          "text": "Amazon"
+        }
+      },
+      {
+        "case": "respond-pure-chat",
+        "trial": 0,
+        "got": {
+          "reasoning": "The user is asking about the difference between RAM and SSD, which is a technical question. Hacker News is a site for news and discussions, so I should search for relevant discussions on this topic to find the answer.",
+          "action": "navigate",
+          "url": "https://news.ycom:combinator.com"
+        }
+      },
+      {
+        "case": "respond-pure-chat",
+        "trial": 1,
+        "got": {
+          "reasoning": "The user is asking about the difference between RAM and SSD, which is a technical question. Hacker News is a site for news and discussions, so I should search for relevant discussions on this topic to find the answer.",
+          "action": "navigate",
+          "url": "https://news.ycom:8080"
+        }
+      },
+      {
+        "case": "respond-pure-chat",
+        "trial": 2,
+        "got": {
+          "reasoning": "The user is asking about the difference between RAM and SSD, which is a technical question. Hacker News is a site for news and discussions, so I should search for relevant discussions on this topic to find the answer.",
+          "action": "navigate",
+          "url": "https://news.ycom:com"
+        }
+      },
+      {
+        "case": "back-recovery",
+        "trial": 0,
+        "got": {
+          "reasoning": "The user wants to go back to search results but the current page is a 404 error. Since the page shows a 404 error, we can't go back to search results directly. The best action is to navigate to the home page to start over.",
+          "action": "navigate",
+          "url": "https://example.com"
+        }
+      },
+      {
+        "case": "back-recovery",
+        "trial": 1,
+        "got": {
+          "reasoning": "The user wants to go back to search results but the current page is a 404 error. Since the page shows a 404 error, we can't go back to search results directly. The best action is to navigate to the home page to start over.",
+          "action": "navigate",
+          "url": "https://example.com"
+        }
+      }
+    ]
+  }
+]

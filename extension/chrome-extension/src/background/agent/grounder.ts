@@ -1,6 +1,6 @@
 import { chatSettingsStore } from '@extension/storage';
 import { createLogger } from '../log';
-import { captureScreenshot, runInPage } from '../perception';
+import { captureScreenshot, runInPage, GROUNDER_SCREENSHOT_OPTS } from '../perception';
 import { getViewportSize } from '../perception/pageScript';
 
 const logger = createLogger('grounder');
@@ -42,7 +42,7 @@ export interface GroundedPoint {
  */
 export async function groundTarget(tabId: number, instruction: string, signal: AbortSignal): Promise<GroundedPoint> {
   const { baseUrl, grounderModel } = await chatSettingsStore.getSettings();
-  const shot = await captureScreenshot(tabId);
+  const shot = await captureScreenshot(tabId, GROUNDER_SCREENSHOT_OPTS);
   const base64 = shot.dataUrl.replace(/^data:[^,]+,/, '');
 
   const response = await fetch(`${baseUrl}/api/chat`, {

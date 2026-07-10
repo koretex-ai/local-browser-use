@@ -9,6 +9,11 @@ const logger = createLogger('perception');
 // downscaling is a first-class lever: cap width and recompress aggressively.
 const MAX_SCREENSHOT_WIDTH = 1024;
 const SCREENSHOT_JPEG_QUALITY = 0.7;
+// The grounder input MUST be >=1280px wide: below Qwen2.5-VL's processing
+// budget (~860k px) the model answers in an internally upscaled coordinate
+// space and every click lands progressively below/right of the target
+// (measured 2026-07-10: +180px y-error at 1024w vs <=10px at 1280w).
+export const GROUNDER_SCREENSHOT_OPTS = { maxWidth: 1280, quality: 0.85 };
 
 async function runInPage<Args extends unknown[], Result>(
   tabId: number,
@@ -41,9 +46,9 @@ export interface Screenshot {
   height: number;
 }
 
-async function downscaleDataUrl(dataUrl: string): Promise<Screenshot> {
+async function downscaleDataUrl(dataUrl: string, maxWidth: number, quality: number): Promise<Screenshot> {
   const source = await createImageBitmap(await (await fetch(dataUrl)).blob());
-  const scale = Math.min(1, MAX_SCREENSHOT_WIDTH / source.width);
+  const scale = Math.min(1, maxWidth / source.width);
   const width = Math.round(source.width * scale);
   const height = Math.round(source.height * scale);
 
@@ -53,14 +58,17 @@ async function downscaleDataUrl(dataUrl: string): Promise<Screenshot> {
   ctx.drawImage(source, 0, 0, width, height);
   source.close();
 
-  const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: SCREENSHOT_JPEG_QUALITY });
+  const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality });
   return { dataUrl: await blobToDataUrl(blob), width, height };
 }
 
-export async function captureScreenshot(tabId: number): Promise<Screenshot> {
+export async function captureScreenshot(
+  tabId: number,
+  opts: { maxWidth?: number; quality?: number } = {},
+): Promise<Screenshot> {
   const tab = await chrome.tabs.get(tabId);
   const raw = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 85 });
-  return downscaleDataUrl(raw);
+  return downscaleDataUrl(raw, opts.maxWidth ?? MAX_SCREENSHOT_WIDTH, opts.quality ?? SCREENSHOT_JPEG_QUALITY);
 }
 
 // Capture the hybrid perception snapshot: DOM set-of-marks AND pixels together,

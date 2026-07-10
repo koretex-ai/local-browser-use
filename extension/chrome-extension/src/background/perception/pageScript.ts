@@ -173,15 +173,23 @@ export function typeIntoElement(index: number, text: string): { ok: boolean; err
   return { ok: false, error: `Element at index ${index} is not editable (<${el.tagName.toLowerCase()}>)` };
 }
 
-// Click at a point in viewport CSS coordinates (vision-grounded click)
-export function clickAtPoint(x: number, y: number): { ok: boolean; error?: string } {
-  const el = document.elementFromPoint(x, y) as HTMLElement | null;
-  if (!el) return { ok: false, error: `Nothing at (${x}, ${y})` };
+// Click at a point in viewport CSS coordinates (vision-grounded click).
+// Climbs from the hit node to the nearest interactive ancestor so clicking an
+// inner span/icon still activates the surrounding link or button, and reports
+// what was actually clicked so bad grounding is visible.
+export function clickAtPoint(x: number, y: number): { ok: boolean; error?: string; hit?: string } {
+  const hitNode = document.elementFromPoint(x, y) as HTMLElement | null;
+  if (!hitNode) return { ok: false, error: `Nothing at (${x}, ${y})` };
+  const INTERACTIVE =
+    'a, button, input, select, textarea, summary, [role="button"], [role="link"], [role="tab"], ' +
+    '[role="menuitem"], [role="option"], [role="checkbox"], [onclick], [contenteditable="true"]';
+  const el = (hitNode.closest(INTERACTIVE) as HTMLElement | null) ?? hitNode;
   for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
     el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y }));
   }
   el.click?.();
-  return { ok: true };
+  const label = (el.getAttribute('aria-label') || el.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+  return { ok: true, hit: `<${el.tagName.toLowerCase()}> ${label}`.trim() };
 }
 
 // Report viewport CSS size (for scaling grounder image coordinates)

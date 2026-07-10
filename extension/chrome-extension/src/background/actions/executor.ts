@@ -40,7 +40,10 @@ async function performAction(tabId: number, action: Action): Promise<ActionResul
       if (!result?.ok) return { ok: false, message: result?.error ?? 'Click failed' };
       await sleep(POST_ACTION_DELAY_MS);
       await waitForTabLoad(tabId);
-      return { ok: true, message: `Clicked at (${action.x}, ${action.y})${action.target ? ` — "${action.target}"` : ''}` };
+      return {
+        ok: true,
+        message: `Clicked at (${action.x}, ${action.y})${result.hit ? `, hit ${result.hit}` : ''}`,
+      };
     }
     case 'type': {
       const result = await runInPage(tabId, typeIntoElement, action.index, action.text);

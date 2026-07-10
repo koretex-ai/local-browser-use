@@ -35,7 +35,41 @@ export function extractInteractiveElements(showHighlights: boolean): ExtractedPa
     '[role="menuitem"], [role="option"], [role="combobox"], [role="textbox"], [role="switch"], ' +
     '[onclick], [contenteditable="true"], [tabindex]:not([tabindex="-1"])';
 
-  const candidates = Array.from(document.querySelectorAll<HTMLElement>(SELECTOR));
+  // Collect candidates recursively through open shadow roots (Reddit, YouTube
+  // and other web-component sites keep their interactive elements there)
+  const collectCandidates = (root: Document | ShadowRoot | Element): HTMLElement[] => {
+    const found: HTMLElement[] = [];
+    for (const el of Array.from(root.querySelectorAll<HTMLElement>(SELECTOR))) {
+      found.push(el);
+    }
+    for (const el of Array.from(root.querySelectorAll<HTMLElement>('*'))) {
+      if (el.shadowRoot) found.push(...collectCandidates(el.shadowRoot));
+    }
+    return found;
+  };
+  const candidates = collectCandidates(document);
+
+  // elementFromPoint that descends through open shadow roots to the deepest node
+  const deepElementFromPoint = (x: number, y: number): Element | null => {
+    let el = document.elementFromPoint(x, y);
+    while (el?.shadowRoot) {
+      const inner = el.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === el) break;
+      el = inner;
+    }
+    return el;
+  };
+
+  // containment check that crosses shadow boundaries (a.contains(b) is false
+  // when b is inside a's shadow root)
+  const composedContains = (a: Element, b: Element): boolean => {
+    let node: Node | null = b;
+    while (node) {
+      if (node === a) return true;
+      node = node.parentNode ?? (node instanceof ShadowRoot ? node.host : null);
+    }
+    return false;
+  };
 
   const isVisible = (el: HTMLElement): boolean => {
     const rect = el.getBoundingClientRect();
@@ -48,8 +82,8 @@ export function extractInteractiveElements(showHighlights: boolean): ExtractedPa
     // Hit-test the center: skip elements fully covered by others
     const cx = Math.max(0, Math.min(window.innerWidth - 1, rect.left + rect.width / 2));
     const cy = Math.max(0, Math.min(window.innerHeight - 1, rect.top + rect.height / 2));
-    const hit = document.elementFromPoint(cx, cy);
-    if (hit && !el.contains(hit) && !hit.contains(el)) return false;
+    const hit = deepElementFromPoint(cx, cy);
+    if (hit && !composedContains(el, hit) && !composedContains(hit, el)) return false;
     return true;
   };
 
@@ -63,7 +97,7 @@ export function extractInteractiveElements(showHighlights: boolean): ExtractedPa
 
   const visible = candidates.filter(isVisible);
   // Drop elements whose interactive ancestor is already included (e.g. span inside <a>)
-  const elements = visible.filter(el => !visible.some(other => other !== el && other.contains(el)));
+  const elements = visible.filter(el => !visible.some(other => other !== el && composedContains(other, el)));
 
   win.__lbu = { elements };
 
@@ -174,21 +208,53 @@ export function typeIntoElement(index: number, text: string): { ok: boolean; err
 }
 
 // Click at a point in viewport CSS coordinates (vision-grounded click).
-// Climbs from the hit node to the nearest interactive ancestor so clicking an
-// inner span/icon still activates the surrounding link or button, and reports
-// what was actually clicked so bad grounding is visible.
+// Shadow-DOM aware: descends through open shadow roots to the deepest hit
+// node, climbs across shadow boundaries to the nearest interactive ancestor,
+// and dispatches composed events. Reports what was actually clicked so bad
+// grounding is visible.
 export function clickAtPoint(x: number, y: number): { ok: boolean; error?: string; hit?: string } {
-  const hitNode = document.elementFromPoint(x, y) as HTMLElement | null;
+  // Descend to the deepest node under the point
+  let hitNode = document.elementFromPoint(x, y);
+  while (hitNode?.shadowRoot) {
+    const inner = hitNode.shadowRoot.elementFromPoint(x, y);
+    if (!inner || inner === hitNode) break;
+    hitNode = inner;
+  }
   if (!hitNode) return { ok: false, error: `Nothing at (${x}, ${y})` };
+
   const INTERACTIVE =
     'a, button, input, select, textarea, summary, [role="button"], [role="link"], [role="tab"], ' +
     '[role="menuitem"], [role="option"], [role="checkbox"], [onclick], [contenteditable="true"]';
-  const el = (hitNode.closest(INTERACTIVE) as HTMLElement | null) ?? hitNode;
+
+  // Climb to an interactive ancestor, crossing shadow boundaries via host
+  let el: HTMLElement = hitNode as HTMLElement;
+  let node: Node | null = hitNode;
+  while (node) {
+    if (node instanceof HTMLElement && node.matches(INTERACTIVE)) {
+      el = node;
+      break;
+    }
+    node = node.parentNode ?? ((node.getRootNode() as ShadowRoot | Document) as ShadowRoot).host ?? null;
+    if (node instanceof ShadowRoot) node = node.host;
+  }
+
   for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
-    el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y }));
+    el.dispatchEvent(
+      new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        clientX: x,
+        clientY: y,
+      }),
+    );
   }
   el.click?.();
-  const label = (el.getAttribute('aria-label') || el.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+  const label = (el.getAttribute('aria-label') || el.innerText || el.textContent || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .slice(0, 60);
   return { ok: true, hit: `<${el.tagName.toLowerCase()}> ${label}`.trim() };
 }
 

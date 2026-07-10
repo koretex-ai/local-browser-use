@@ -69,6 +69,13 @@ function MessageBlock({ message, isSameActor, isDarkMode = false }: MessageBlock
               message.content
             )}
           </div>
+          {message.image && (
+            <img
+              src={message.image}
+              alt="Page screenshot"
+              className={`mt-1 max-w-full rounded border ${isDarkMode ? 'border-slate-700' : 'border-gray-200'}`}
+            />
+          )}
           {!isProgress && (
             <div className={`text-right text-xs ${isDarkMode ? 'text-gray-500' : 'text-gray-300'}`}>
               {formatTimestamp(message.timestamp)}

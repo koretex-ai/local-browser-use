@@ -1,6 +1,7 @@
 import 'webextension-polyfill';
 import { Actors, chatHistoryStore, chatSettingsStore } from '@extension/storage';
 import { createLogger } from './log';
+import { handleCommand } from './commands';
 
 const logger = createLogger('background');
 
@@ -151,6 +152,20 @@ chrome.runtime.onConnect.addListener(port => {
           if (!message.taskId) return port.postMessage({ type: 'error', error: 'No task ID provided' });
           logger.info(message.type, message.taskId, message.task);
           await runChat(port, message.taskId, message.task);
+          break;
+        }
+
+        case 'command': {
+          if (!message.command) return port.postMessage({ type: 'error', error: 'No command provided' });
+          if (!message.tabId) return port.postMessage({ type: 'error', error: 'No tab ID provided' });
+          logger.info('command', message.tabId, message.command);
+          try {
+            const result = await handleCommand(message.command, message.tabId, message.taskId ?? 'adhoc');
+            port.postMessage({ type: 'command_result', text: result.text, image: result.image });
+          } catch (error) {
+            const text = error instanceof Error ? error.message : String(error);
+            port.postMessage({ type: 'command_result', text: `Command failed: ${text}` });
+          }
           break;
         }
 

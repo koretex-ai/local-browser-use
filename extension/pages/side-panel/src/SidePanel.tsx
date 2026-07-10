@@ -148,6 +148,14 @@ const SidePanel = () => {
           handleExecutionEvent(message);
         } else if (message && message.type === 'stream_chunk') {
           setStreamingText(prev => (prev ?? '') + message.delta);
+        } else if (message && message.type === 'command_result') {
+          appendMessage({
+            actor: Actors.SYSTEM,
+            content: message.text || '',
+            image: message.image,
+            timestamp: Date.now(),
+          });
+          finishTask();
         } else if (message && message.type === 'error') {
           appendMessage({
             actor: Actors.SYSTEM,
@@ -218,6 +226,43 @@ const SidePanel = () => {
     [stopConnection],
   );
 
+  // Slash commands drive the perception/executor layer against the active tab
+  const handleCommand = async (command: string) => {
+    try {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tabId = tabs[0]?.id;
+      if (!tabId) throw new Error('No active tab found');
+
+      setInputEnabled(false);
+      setShowStopButton(false);
+
+      appendMessage({
+        actor: Actors.USER,
+        content: command,
+        timestamp: Date.now(),
+      });
+
+      if (!portRef.current) {
+        setupConnection();
+      }
+
+      await sendMessage({
+        type: 'command',
+        command,
+        taskId: sessionIdRef.current,
+        tabId,
+      });
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      appendMessage({
+        actor: Actors.SYSTEM,
+        content: errorMessage,
+        timestamp: Date.now(),
+      });
+      finishTask();
+    }
+  };
+
   const handleSendMessage = async (text: string, displayText?: string) => {
     const trimmedText = text.trim();
     if (!trimmedText) return;
@@ -225,6 +270,11 @@ const SidePanel = () => {
     // Block sending messages in historical sessions
     if (isHistoricalSession) {
       console.log('Cannot send messages in historical sessions');
+      return;
+    }
+
+    if (trimmedText.startsWith('/')) {
+      await handleCommand(trimmedText);
       return;
     }
 

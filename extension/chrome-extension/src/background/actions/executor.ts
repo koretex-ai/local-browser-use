@@ -1,0 +1,104 @@
+import type { Action, PerceptionSnapshot } from '@extension/storage';
+import { trajectoryStore } from '@extension/storage';
+import { createLogger } from '../log';
+import { capturePageState, runInPage } from '../perception';
+import { clickElementByIndex, typeIntoElement, scrollPage } from '../perception/pageScript';
+
+const logger = createLogger('executor');
+
+// Give the page a beat to react (navigation start, DOM updates) after an action
+const POST_ACTION_DELAY_MS = 500;
+
+export interface ActionResult {
+  ok: boolean;
+  message: string;
+}
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function waitForTabLoad(tabId: number, timeoutMs = 10000): Promise<void> {
+  const start = Date.now();
+  for (;;) {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.status === 'complete') return;
+    if (Date.now() - start > timeoutMs) return;
+    await sleep(200);
+  }
+}
+
+async function performAction(tabId: number, action: Action): Promise<ActionResult> {
+  switch (action.type) {
+    case 'click': {
+      const result = await runInPage(tabId, clickElementByIndex, action.index);
+      if (!result?.ok) return { ok: false, message: result?.error ?? 'Click failed' };
+      await sleep(POST_ACTION_DELAY_MS);
+      await waitForTabLoad(tabId);
+      return { ok: true, message: `Clicked element [${action.index}]` };
+    }
+    case 'type': {
+      const result = await runInPage(tabId, typeIntoElement, action.index, action.text);
+      if (!result?.ok) return { ok: false, message: result?.error ?? 'Type failed' };
+      return { ok: true, message: `Typed "${action.text}" into element [${action.index}]` };
+    }
+    case 'scroll': {
+      await runInPage(tabId, scrollPage, action.direction, action.amount);
+      await sleep(300);
+      return { ok: true, message: `Scrolled ${action.direction}` };
+    }
+    case 'navigate': {
+      const url = /^[a-z]+:\/\//i.test(action.url) ? action.url : `https://${action.url}`;
+      await chrome.tabs.update(tabId, { url });
+      await sleep(POST_ACTION_DELAY_MS);
+      await waitForTabLoad(tabId);
+      return { ok: true, message: `Navigated to ${url}` };
+    }
+    case 'back': {
+      await chrome.tabs.goBack(tabId);
+      await sleep(POST_ACTION_DELAY_MS);
+      await waitForTabLoad(tabId);
+      return { ok: true, message: 'Went back' };
+    }
+    case 'done': {
+      return { ok: true, message: action.message };
+    }
+  }
+}
+
+/**
+ * Execute a typed action against a tab. Captures the pre-action perception
+ * snapshot (DOM + screenshot) and logs the step to the trajectory store —
+ * the data flywheel records from the very first action.
+ */
+export async function executeAction(tabId: number, sessionId: string, action: Action): Promise<ActionResult> {
+  let before: PerceptionSnapshot | null = null;
+  if (action.type !== 'navigate' && action.type !== 'done') {
+    // navigate/done don't depend on page state; skip the capture cost
+    before = await capturePageState(tabId, false).catch(error => {
+      logger.warning('pre-action capture failed:', error);
+      return null;
+    });
+  }
+
+  let result: ActionResult;
+  try {
+    result = await performAction(tabId, action);
+  } catch (error) {
+    result = { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
+
+  if (before) {
+    trajectoryStore
+      .appendStep({
+        sessionId,
+        before,
+        action,
+        ok: result.ok,
+        error: result.ok ? undefined : result.message,
+        timestamp: Date.now(),
+      })
+      .catch(error => logger.warning('trajectory logging failed:', error));
+  }
+
+  logger.info('action', JSON.stringify(action), '->', result.message);
+  return result;
+}

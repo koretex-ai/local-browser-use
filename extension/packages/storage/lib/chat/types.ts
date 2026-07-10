@@ -8,6 +8,8 @@ export interface Message {
   actor: Actors;
   content: string;
   timestamp: number; // Unix timestamp in milliseconds
+  /** Optional data-URL image rendered below the content (e.g. screenshots) */
+  image?: string;
 }
 
 export interface ChatMessage extends Message {

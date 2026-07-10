@@ -60,8 +60,9 @@ const manifest = withOperaSidebar(
     name: '__MSG_app_metadata_name__',
     version: packageJson.version,
     description: '__MSG_app_metadata_description__',
-    host_permissions: ['http://localhost/*', 'http://127.0.0.1/*'],
-    permissions: ['storage', 'tabs', 'activeTab', 'unlimitedStorage'],
+    // <all_urls> is required for perception/actions on arbitrary pages (Phase 2+)
+    host_permissions: ['http://localhost/*', 'http://127.0.0.1/*', '<all_urls>'],
+    permissions: ['storage', 'tabs', 'activeTab', 'scripting', 'unlimitedStorage'],
     options_page: 'options/index.html',
     background: {
       service_worker: 'background.iife.js',

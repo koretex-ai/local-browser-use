@@ -75,7 +75,8 @@ async function runChat(port: chrome.runtime.Port, taskId: string, task: string) 
     const response = await fetch(`${baseUrl}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages, stream: true }),
+      // think: false — qwen3.5 supports non-thinking mode; skip reasoning tokens for snappy chat
+      body: JSON.stringify({ model, messages, stream: true, think: false }),
       signal: abort.signal,
     });
 

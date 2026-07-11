@@ -47,6 +47,16 @@ export interface CheckpointResult {
   subtasks?: Subtask[];
 }
 
+export interface RescueResult {
+  decision: 'retry' | 'replan' | 'fail';
+  /** Corrected, more concrete goal for decision=retry */
+  revisedGoal?: string;
+  revisedSuccess?: string;
+  reason?: string;
+  /** Remaining subtasks for decision=replan */
+  subtasks?: Subtask[];
+}
+
 const TRIAGE_SYSTEM_PROMPT = `You are the orchestrator for a browser agent that runs in a Chrome side panel. A small local model executes browser actions (click, type into fields, scroll, navigate, go back) against the user's active tab, up to ~10 actions per subtask. It is reliable on short concrete goals and unreliable on long or vague ones. You never see the page yourself — plan from the task alone.
 
 Classify the user's request and reply ONLY with a JSON object:
@@ -69,6 +79,17 @@ Reply ONLY with a JSON object:
 - "fail": the task cannot be completed (explain in "reason").
 
 Be strict: if an outcome summary does not actually contain the information or confirmation the task needs, do not declare done.`;
+
+const RESCUE_SYSTEM_PROMPT = `You are the orchestrator for a browser agent. The small local executor is STUCK: it kept repeating an action with no effect on the page. You get the goal it was pursuing, the actions it tried, and the interactive elements currently visible on the page (labels only — you cannot see the page itself).
+
+Diagnose the real blocker and reply ONLY with a JSON object:
+{"decision": "retry" | "replan" | "fail", "revisedGoal": "<corrected concrete goal>", "revisedSuccess": "<criterion>", "reason": "<short diagnosis>", "subtasks": [{"goal": "...", "success": "..."}]}
+
+- "retry": the goal was right but the approach was wrong. Write a REVISED goal that names the exact element (quote its label from the list) and the exact steps, avoiding what was already tried.
+- "replan": the plan itself is wrong from here. Provide the remaining subtasks.
+- "fail": the goal is impossible on this page (e.g. requires the user to be signed in).
+
+Typical blockers to consider: a dialog needs a recipient/field filled first, the target is behind a menu, the wrong element was targeted, a disabled button's precondition is unmet, the page requires login.`;
 
 // Tolerant JSON extraction (models sometimes wrap JSON in fences or prose)
 function parseJsonObject<T>(content: string): T {
@@ -155,6 +176,34 @@ export async function triageTask(
   if (result.mode === 'plan' && (!Array.isArray(result.subtasks) || result.subtasks.length === 0)) {
     // A plan with no subtasks degrades to direct execution
     return { result: { mode: 'execute' }, usage };
+  }
+  return { result, usage };
+}
+
+export interface StuckDigest {
+  goal: string;
+  actions: string[];
+  /** Labels of interactive elements currently on the page ("[i]<tag> label") */
+  elements: string[];
+  url?: string;
+  title?: string;
+}
+
+// Mid-subtask rescue: the executor is looping; ask for a corrected goal.
+// The digest widens the boundary to element LABELS (text), never pixels.
+export async function rescueSubtask(
+  task: string,
+  stuck: StuckDigest,
+  signal: AbortSignal,
+): Promise<{ result: RescueResult; usage: CallUsage }> {
+  const userContent =
+    `TASK: ${task}\n\nSTUCK SUBTASK GOAL: ${stuck.goal}\n\n` +
+    `PAGE: ${stuck.title ?? ''} — ${stuck.url ?? ''}\n` +
+    `ACTIONS TRIED:\n${stuck.actions.join('\n') || '(none)'}\n\n` +
+    `INTERACTIVE ELEMENTS ON PAGE:\n${stuck.elements.slice(0, 60).join('\n')}`;
+  const { value: result, usage } = await callOrchestrator<RescueResult>(RESCUE_SYSTEM_PROMPT, userContent, signal);
+  if (!['retry', 'replan', 'fail'].includes(result.decision)) {
+    throw new Error(`Orchestrator returned invalid rescue decision: ${String(result.decision)}`);
   }
   return { result, usage };
 }

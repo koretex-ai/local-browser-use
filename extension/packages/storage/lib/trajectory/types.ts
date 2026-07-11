@@ -47,17 +47,67 @@ export interface TrajectoryStep {
   sessionId: string;
   /** Perception before the action was executed */
   before: PerceptionSnapshot;
-  action: Action;
+  /** The executed typed action; null when the decision was rejected before execution */
+  action: Action | null;
   /** Whether execution reported success */
   ok: boolean;
-  /** Error message if execution failed */
+  /** Error message if execution failed (or why the decision was rejected) */
   error?: string;
   timestamp: number;
+  // --- training-label context (v2) ---
+  /** Subtask this step belongs to (joins to SubtaskRecord for outcome labels) */
+  subtaskId?: string;
+  /** The planner's raw decision JSON, including its reasoning */
+  decision?: unknown;
+  /** Model that produced the decision */
+  plannerModel?: string;
+  /** The HISTORY lines the planner saw when deciding (its input context) */
+  historyContext?: string[];
+}
+
+// One bounded goal executed by the local loop — the credit-assignment unit
+export interface SubtaskRecord {
+  id: string;
+  sessionId: string;
+  /** TaskRecord this subtask belongs to */
+  taskRecordId: string;
+  goal: string;
+  /** Success criterion the checkpoint judged against (empty for local mode) */
+  success: string;
+  status: 'ok' | 'fail' | 'stuck';
+  summary: string;
+  stepsCount: number;
+  /** Who authored this goal */
+  plannedBy: 'orchestrator' | 'user';
+  startedAt: number;
+  endedAt: number;
+}
+
+// One full user task — the end-to-end success label
+export interface TaskRecord {
+  id: string;
+  sessionId: string;
+  task: string;
+  mode: 'local' | 'chat' | 'execute' | 'plan';
+  outcome: 'ok' | 'fail' | 'cancel';
+  answer: string;
+  replans: number;
+  totalCostUsd: number;
+  cloudCalls: number;
+  orchestratorModel?: string;
+  localModel: string;
+  grounderModel: string;
+  startedAt: number;
+  endedAt: number;
 }
 
 export interface TrajectoryStorage {
   appendStep: (step: Omit<TrajectoryStep, 'id'>) => Promise<TrajectoryStep>;
+  appendSubtask: (record: SubtaskRecord) => Promise<void>;
+  appendTask: (record: TaskRecord) => Promise<void>;
   getSteps: (sessionId: string) => Promise<TrajectoryStep[]>;
+  getSubtasks: (sessionId: string) => Promise<SubtaskRecord[]>;
+  getTasks: (sessionId: string) => Promise<TaskRecord[]>;
   getSessionIds: () => Promise<string[]>;
   clearSession: (sessionId: string) => Promise<void>;
   clearAll: () => Promise<void>;

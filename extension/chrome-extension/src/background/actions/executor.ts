@@ -88,11 +88,21 @@ async function performAction(tabId: number, action: Action): Promise<ActionResul
  * registry and invalidate the indices the planner just chose (SPA pages
  * morph continuously, so the two extractions disagree).
  */
+export interface StepLogContext {
+  subtaskId?: string;
+  /** The planner's raw decision JSON, including reasoning */
+  decision?: unknown;
+  plannerModel?: string;
+  /** The HISTORY lines the planner saw when deciding */
+  historyContext?: string[];
+}
+
 export async function executeAction(
   tabId: number,
   sessionId: string,
   action: Action,
   beforeSnapshot?: PerceptionSnapshot | null,
+  logContext?: StepLogContext,
 ): Promise<ActionResult> {
   let before: PerceptionSnapshot | null = null;
   if (action.type !== 'navigate' && action.type !== 'done') {
@@ -115,6 +125,7 @@ export async function executeAction(
         ok: result.ok,
         error: result.ok ? undefined : result.message,
         timestamp: Date.now(),
+        ...logContext,
       })
       .catch(error => logger.warning('trajectory logging failed:', error));
   }

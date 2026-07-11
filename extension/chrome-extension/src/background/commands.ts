@@ -21,6 +21,7 @@ const HELP = [
   '/ground <description> — locate an element visually (Holo) and click it',
   '/nohighlight — remove element highlights',
   '/trajectory — show logged trajectory step count',
+  '/export — download logged trajectories as training-ready JSONL',
   '/help — this message',
 ].join('\n');
 

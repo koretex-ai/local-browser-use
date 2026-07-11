@@ -1,5 +1,5 @@
-import type { PerceptionSnapshot } from '@extension/storage';
-import { Actors, chatSettingsStore } from '@extension/storage';
+import type { PerceptionSnapshot, TaskRecord } from '@extension/storage';
+import { Actors, chatSettingsStore, trajectoryStore } from '@extension/storage';
 import { createLogger } from '../log';
 import { postExecutionEvent } from '../events';
 import { capturePageState, clearHighlights } from '../perception';
@@ -7,14 +7,30 @@ import { executeAction } from '../actions/executor';
 import { streamChatReply } from './chat';
 import { groundTarget } from './grounder';
 import { planNextAction, validateCompletion, decisionToAction } from './planner';
+import type { PlannerDecision } from './planner';
 import {
   PLANNER_SYSTEM_PROMPT,
   VALIDATOR_SYSTEM_PROMPT,
   formatPlannerTurn,
   formatValidatorTurn,
 } from './prompts';
-import { isOrchestratorConfigured, triageTask, checkpoint } from './orchestrator';
+import { isOrchestratorConfigured, triageTask, checkpoint, rescueSubtask } from './orchestrator';
 import type { Subtask, SubtaskOutcome, CallUsage } from './orchestrator';
+
+const logger = createLogger('agent');
+
+const MAX_STEPS = 10;
+const MAX_CONSECUTIVE_FAILURES = 3;
+// Validate at most once: a 4B validator that rejects twice is more likely
+// wrong than the planner; don't burn the step budget arguing
+const MAX_VALIDATION_REJECTIONS = 1;
+// A decision repeated this many times (or a page unchanged across this many
+// steps) means the executor is looping — warn once, then declare stuck
+const STUCK_REPEAT_THRESHOLD = 3;
+// Orchestrated-mode budgets
+const MAX_SUBTASKS = 8;
+const MAX_REPLANS = 2;
+const MAX_RESCUES_PER_SUBTASK = 1;
 
 function cloudMeta(usage: CallUsage): string {
   const cost =
@@ -25,17 +41,6 @@ function cloudMeta(usage: CallUsage): string {
         : 'cost n/a';
   return `☁ ${usage.model} · ${cost}`;
 }
-
-const logger = createLogger('agent');
-
-const MAX_STEPS = 10;
-const MAX_CONSECUTIVE_FAILURES = 3;
-// Validate at most once: a 4B validator that rejects twice is more likely
-// wrong than the planner; don't burn the step budget arguing
-const MAX_VALIDATION_REJECTIONS = 1;
-// Orchestrated-mode budgets
-const MAX_SUBTASKS = 8;
-const MAX_REPLANS = 2;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function summarizable(decision: any): string {
@@ -55,27 +60,63 @@ function summarizable(decision: any): string {
   }
 }
 
+function decisionKey(decision: PlannerDecision): string {
+  return JSON.stringify([
+    decision.action,
+    decision.index,
+    decision.target,
+    decision.text,
+    decision.url,
+    decision.direction,
+  ]);
+}
+
+function pageSignature(state: PerceptionSnapshot | null): string {
+  if (!state) return 'no-state';
+  return `${state.url}|${state.scroll.y}|${state.elements.length}|${state.elements
+    .map(el => el.text)
+    .join(',')
+    .slice(0, 400)}`;
+}
+
+function elementsDigestOf(state: PerceptionSnapshot | null): string[] {
+  if (!state) return [];
+  return state.elements.slice(0, 60).map(el => {
+    const kind = el.role && el.role !== el.tag ? `${el.tag}:${el.role}` : el.tag;
+    const label = (el.text || el.placeholder || el.href || '').slice(0, 60);
+    return `[${el.index}]<${kind}> ${label}`.trim();
+  });
+}
+
 interface SubtaskRunResult {
-  status: 'ok' | 'fail' | 'streamed';
+  status: 'ok' | 'fail' | 'stuck' | 'streamed';
   summary: string;
   actions: string[];
   url?: string;
   title?: string;
+  /** Element labels at the point of getting stuck (rescue-call input) */
+  elementsDigest?: string[];
 }
 
 interface SubtaskOptions {
+  /** TaskRecord this subtask belongs to */
+  taskRecordId: string;
+  /** Success criterion (recorded; also appended to the goal by callers) */
+  success?: string;
+  plannedBy: 'orchestrator' | 'user';
   /** Run the local 4B validator on 'done' (local-only mode; checkpoints cover it in hybrid) */
   useLocalValidator: boolean;
   /** Allow a 'respond' decision to fall through to streaming chat (top-level tasks only) */
   allowRespondChat: boolean;
-  /** Prefix for step narration, e.g. "Subtask 2/4 — " */
+  /** Prefix for step narration, e.g. "[2/4] " */
   stepPrefix?: string;
 }
 
 /**
  * The inner loop: perceive → plan → execute against one bounded goal.
- * Returns a structured outcome; posts step narration but no terminal events —
- * callers decide how the task ends.
+ * Detects decision loops and no-effect streaks (warn once, then 'stuck').
+ * Returns a structured outcome and writes a SubtaskRecord; posts step
+ * narration but no terminal events — callers decide how the task ends.
  */
 async function runSubtask(
   port: chrome.runtime.Port,
@@ -85,22 +126,68 @@ async function runSubtask(
   opts: SubtaskOptions,
   signal: AbortSignal,
 ): Promise<SubtaskRunResult> {
+  const subtaskId = crypto.randomUUID();
+  const startedAt = Date.now();
   const history: string[] = [];
   const prefix = opts.stepPrefix ?? '';
   let consecutiveFailures = 0;
   let validationRejections = 0;
+  let stepsCount = 0;
   let lastState: PerceptionSnapshot | null = null;
+  // Loop detection
+  let repeatKey = '';
+  let repeatCount = 0;
+  let lastSignature = '';
+  let sameSignatureStreak = 0;
+  let loopWarned = false;
+
   const { model: localModel, grounderModel } = await chatSettingsStore.getSettings();
   const plannerMeta = `⌂ ${localModel} (local) · $0`;
   const grounderMeta = `⌂ ${grounderModel.split('/').pop()} (local) · $0`;
 
-  const finish = (status: 'ok' | 'fail', summary: string): SubtaskRunResult => ({
-    status,
-    summary,
-    actions: history.slice(-6),
-    url: lastState?.url,
-    title: lastState?.title,
-  });
+  const finalize = async (status: 'ok' | 'fail' | 'stuck', summary: string): Promise<SubtaskRunResult> => {
+    await trajectoryStore
+      .appendSubtask({
+        id: subtaskId,
+        sessionId: taskId,
+        taskRecordId: opts.taskRecordId,
+        goal,
+        success: opts.success ?? '',
+        status,
+        summary,
+        stepsCount,
+        plannedBy: opts.plannedBy,
+        startedAt,
+        endedAt: Date.now(),
+      })
+      .catch(error => logger.warning('subtask record failed:', error));
+    return {
+      status,
+      summary,
+      actions: history.slice(-6),
+      url: lastState?.url,
+      title: lastState?.title,
+      elementsDigest: status === 'stuck' ? elementsDigestOf(lastState) : undefined,
+    };
+  };
+
+  const logRejectedDecision = (decision: PlannerDecision, error: string) => {
+    if (!lastState) return;
+    trajectoryStore
+      .appendStep({
+        sessionId: taskId,
+        before: lastState,
+        action: null,
+        ok: false,
+        error,
+        timestamp: Date.now(),
+        subtaskId,
+        decision,
+        plannerModel: localModel,
+        historyContext: history.slice(-8),
+      })
+      .catch(err => logger.warning('trajectory logging failed:', err));
+  };
 
   try {
     for (let step = 1; step <= MAX_STEPS; step++) {
@@ -112,18 +199,56 @@ async function runSubtask(
       });
       lastState = state ?? lastState;
 
+      // No-effect detection: the page has not changed across executed steps
+      const signature = pageSignature(state);
+      if (signature === lastSignature) sameSignatureStreak++;
+      else {
+        sameSignatureStreak = 0;
+        lastSignature = signature;
+      }
+
       const decision = await planNextAction(PLANNER_SYSTEM_PROMPT, formatPlannerTurn(goal, history, state), signal);
       logger.info(`${prefix}step ${step}:`, JSON.stringify(decision));
+      stepsCount++;
+
+      // Repeated-decision detection
+      const key = decisionKey(decision);
+      if (key === repeatKey) repeatCount++;
+      else {
+        repeatKey = key;
+        repeatCount = 1;
+      }
+      const isTerminal = decision.action === 'done' || decision.action === 'respond';
+      if (!isTerminal && (repeatCount >= STUCK_REPEAT_THRESHOLD || sameSignatureStreak >= STUCK_REPEAT_THRESHOLD)) {
+        if (!loopWarned) {
+          loopWarned = true;
+          repeatCount = 0;
+          logRejectedDecision(decision, 'suppressed: repeated action with no page change');
+          history.push(
+            'NOTE: you are repeating the same action and the page is NOT changing. That approach does not work. ' +
+              'Choose something DIFFERENT: another element, scroll, navigate, or report the blocker via done.',
+          );
+          continue;
+        }
+        logRejectedDecision(decision, 'stuck: repeated action with no page change after warning');
+        await clearHighlights(tabId).catch(() => {});
+        return await finalize(
+          'stuck',
+          `Looping without progress: repeated "${summarizable(decision)}" with no page change. Last steps:\n${history
+            .slice(-4)
+            .join('\n')}`,
+        );
+      }
 
       if (decision.action === 'respond') {
         if (opts.allowRespondChat) {
           await clearHighlights(tabId).catch(() => {});
           await streamChatReply(port, taskId, goal, signal);
-          return { status: 'streamed', summary: '', actions: history.slice(-6) };
+          return await finalize('ok', '(answered conversationally)').then(r => ({ ...r, status: 'streamed' as const }));
         }
         // Inside a plan, 'respond' means: nothing to do in the browser
         await clearHighlights(tabId).catch(() => {});
-        return finish('ok', decision.message || 'No browser action was needed for this subtask.');
+        return await finalize('ok', decision.message || 'No browser action was needed for this subtask.');
       }
 
       if (decision.action === 'done') {
@@ -152,8 +277,15 @@ async function runSubtask(
           }
         }
         await clearHighlights(tabId).catch(() => {});
-        return finish('ok', answer);
+        return await finalize('ok', answer);
       }
+
+      const logContext = {
+        subtaskId,
+        decision,
+        plannerModel: localModel,
+        historyContext: history.slice(-8),
+      };
 
       // Hybrid grounding: click-by-target routes through the vision grounder
       if (decision.action === 'click' && decision.index === undefined && decision.target) {
@@ -174,6 +306,7 @@ async function runSubtask(
             taskId,
             { type: 'click_at', x: point.x, y: point.y, target: point.target },
             state,
+            logContext,
           );
           history.push(`ground+click "${decision.target}" -> ${result.ok ? 'ok' : `FAILED: ${result.message}`}`);
           consecutiveFailures = result.ok ? 0 : consecutiveFailures + 1;
@@ -190,6 +323,7 @@ async function runSubtask(
       const action = decisionToAction(decision);
       if (action === null) continue; // unreachable, satisfies types
       if ('error' in action) {
+        logRejectedDecision(decision, action.error);
         history.push(`invalid decision (${summarizable(decision)}): ${action.error}`);
         consecutiveFailures++;
         if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) break;
@@ -199,10 +333,11 @@ async function runSubtask(
       // Reject hallucinated indices before executing: the planner must pick
       // from the PAGE list it was shown
       if ((action.type === 'click' || action.type === 'type') && state && action.index >= state.elements.length) {
-        history.push(
-          `${summarizable(decision)} -> REJECTED: index ${action.index} is not in the PAGE list ` +
-            `(it has ${state.elements.length} elements, [0]..[${state.elements.length - 1}])`,
-        );
+        const error =
+          `index ${action.index} is not in the PAGE list ` +
+          `(it has ${state.elements.length} elements, [0]..[${state.elements.length - 1}])`;
+        logRejectedDecision(decision, error);
+        history.push(`${summarizable(decision)} -> REJECTED: ${error}`);
         consecutiveFailures++;
         if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) break;
         continue;
@@ -217,7 +352,7 @@ async function runSubtask(
         plannerMeta,
       );
 
-      const result = await executeAction(tabId, taskId, action, state);
+      const result = await executeAction(tabId, taskId, action, state, logContext);
       history.push(`${summarizable(decision)} -> ${result.ok ? 'ok' : `FAILED: ${result.message}`}`);
 
       consecutiveFailures = result.ok ? 0 : consecutiveFailures + 1;
@@ -225,7 +360,7 @@ async function runSubtask(
     }
 
     await clearHighlights(tabId).catch(() => {});
-    return finish(
+    return await finalize(
       'fail',
       consecutiveFailures >= MAX_CONSECUTIVE_FAILURES
         ? `Stopped after ${MAX_CONSECUTIVE_FAILURES} consecutive failures. Last steps:\n${history.slice(-3).join('\n')}`
@@ -243,73 +378,159 @@ async function runLocalTask(
   tabId: number,
   taskId: string,
   task: string,
+  record: TaskRecord,
   signal: AbortSignal,
 ): Promise<void> {
+  record.mode = 'local';
   const outcome = await runSubtask(
     port,
     tabId,
     taskId,
     task,
-    { useLocalValidator: true, allowRespondChat: true },
+    { taskRecordId: record.id, plannedBy: 'user', useLocalValidator: true, allowRespondChat: true },
     signal,
   );
-  if (outcome.status === 'streamed') return; // chat path posted its own events
-  const { model } = await chatSettingsStore.getSettings();
-  const meta = `⌂ ${model} (local) · task total $0`;
+  if (outcome.status === 'streamed') {
+    record.outcome = 'ok';
+    return; // chat path posted its own events
+  }
+  const meta = `⌂ ${record.localModel} (local) · task total $0`;
   if (outcome.status === 'ok') {
+    record.outcome = 'ok';
+    record.answer = outcome.summary;
     postExecutionEvent(port, Actors.ASSISTANT, 'task.ok', taskId, outcome.summary, meta);
   } else {
+    record.outcome = 'fail';
+    record.answer = outcome.summary;
     postExecutionEvent(port, Actors.SYSTEM, 'task.fail', taskId, outcome.summary, meta);
   }
 }
 
-/** Hybrid mode: cloud orchestrator plans and checkpoints; local models execute. */
+/** Hybrid mode: cloud orchestrator plans, checkpoints, and rescues; local models execute. */
 async function runOrchestratedTask(
   port: chrome.runtime.Port,
   tabId: number,
   taskId: string,
   task: string,
+  record: TaskRecord,
   signal: AbortSignal,
 ): Promise<void> {
-  // Running tally of cloud spend for the end-of-task total
-  let cloudCost = 0;
-  let cloudCalls = 0;
   let costKnown = true;
   const track = (usage: CallUsage): string => {
-    cloudCalls++;
-    if (usage.cost !== null) cloudCost += usage.cost;
+    record.cloudCalls++;
+    record.orchestratorModel = usage.model;
+    if (usage.cost !== null) record.totalCostUsd += usage.cost;
     else costKnown = false;
     return cloudMeta(usage);
   };
   const totalMeta = () =>
-    `task total ${costKnown ? '' : '≥'}$${cloudCost.toFixed(4)} · ${cloudCalls} cloud call${cloudCalls === 1 ? '' : 's'}`;
+    `task total ${costKnown ? '' : '≥'}$${record.totalCostUsd.toFixed(4)} · ${record.cloudCalls} cloud call${record.cloudCalls === 1 ? '' : 's'}`;
+
+  const finishOk = (answer: string, meta: string) => {
+    record.outcome = 'ok';
+    record.answer = answer;
+    postExecutionEvent(port, Actors.ASSISTANT, 'task.ok', taskId, answer, `${meta} · ${totalMeta()}`);
+  };
+  const finishFail = (reason: string, meta: string) => {
+    record.outcome = 'fail';
+    record.answer = reason;
+    postExecutionEvent(port, Actors.SYSTEM, 'task.fail', taskId, reason, `${meta} · ${totalMeta()}`);
+  };
+
+  // Run one subtask with stuck-rescue: on 'stuck', ask the orchestrator for a
+  // corrected goal and retry once before reporting the outcome
+  const runWithRescue = async (
+    subtask: Subtask,
+    stepPrefix: string,
+  ): Promise<{ run: SubtaskRunResult; goal: string; replanRequest?: Subtask[] }> => {
+    let currentGoal = subtask.goal;
+    let currentSuccess = subtask.success;
+    let rescues = 0;
+    for (;;) {
+      const run = await runSubtask(
+        port,
+        tabId,
+        taskId,
+        `${currentGoal} (success: ${currentSuccess})`,
+        {
+          taskRecordId: record.id,
+          success: currentSuccess,
+          plannedBy: 'orchestrator',
+          useLocalValidator: false,
+          allowRespondChat: false,
+          stepPrefix,
+        },
+        signal,
+      );
+      if (run.status !== 'stuck' || rescues >= MAX_RESCUES_PER_SUBTASK) {
+        return { run, goal: currentGoal };
+      }
+      rescues++;
+      const { result: rescue, usage } = await rescueSubtask(
+        task,
+        {
+          goal: currentGoal,
+          actions: run.actions,
+          elements: run.elementsDigest ?? [],
+          url: run.url,
+          title: run.title,
+        },
+        signal,
+      );
+      const rescueMeta = track(usage);
+      logger.info('rescue:', JSON.stringify(rescue).slice(0, 300));
+      if (rescue.decision === 'retry' && rescue.revisedGoal) {
+        postExecutionEvent(
+          port,
+          Actors.SYSTEM,
+          'step.ok',
+          taskId,
+          `Stuck — orchestrator revised the goal: ${rescue.revisedGoal}${rescue.reason ? ` (${rescue.reason})` : ''}`,
+          rescueMeta,
+        );
+        currentGoal = rescue.revisedGoal;
+        currentSuccess = rescue.revisedSuccess || currentSuccess;
+        continue;
+      }
+      if (rescue.decision === 'replan' && rescue.subtasks?.length) {
+        postExecutionEvent(
+          port,
+          Actors.SYSTEM,
+          'step.ok',
+          taskId,
+          `Stuck — orchestrator wants to replan${rescue.reason ? `: ${rescue.reason}` : ''}`,
+          rescueMeta,
+        );
+        return { run, goal: currentGoal, replanRequest: rescue.subtasks };
+      }
+      // rescue says fail — surface the diagnosis as the outcome summary
+      return {
+        run: { ...run, status: 'fail', summary: rescue.reason || run.summary },
+        goal: currentGoal,
+      };
+    }
+  };
 
   const { result: triage, usage: triageUsage } = await triageTask(task, signal);
   const triageMeta = track(triageUsage);
   logger.info('triage:', JSON.stringify(triage).slice(0, 300));
+  record.mode = triage.mode;
 
   if (triage.mode === 'chat') {
-    postExecutionEvent(port, Actors.ASSISTANT, 'task.ok', taskId, triage.reply || '', `${triageMeta} · ${totalMeta()}`);
+    finishOk(triage.reply || '', triageMeta);
     return;
   }
 
   if (triage.mode === 'execute') {
     // Single concrete goal: run the local loop, checkpoint validates the result
-    const outcome = await runSubtask(
-      port,
-      tabId,
-      taskId,
-      task,
-      { useLocalValidator: false, allowRespondChat: false },
-      signal,
-    );
-    const plan: Subtask[] = [{ goal: task, success: 'the task is complete' }];
-    const { result: verdict, usage } = await checkpoint(task, plan, [toOutcome(task, outcome)], signal);
-    const meta = `${track(usage)} · ${totalMeta()}`;
-    if (verdict.decision === 'done' || (verdict.decision === 'continue' && outcome.status === 'ok')) {
-      postExecutionEvent(port, Actors.ASSISTANT, 'task.ok', taskId, verdict.answer || outcome.summary, meta);
+    const { run, goal } = await runWithRescue({ goal: task, success: 'the task is complete' }, '');
+    const plan: Subtask[] = [{ goal, success: 'the task is complete' }];
+    const { result: verdict, usage } = await checkpoint(task, plan, [toOutcome(goal, run)], signal);
+    const meta = track(usage);
+    if (verdict.decision === 'done' || (verdict.decision === 'continue' && run.status === 'ok')) {
+      finishOk(verdict.answer || run.summary, meta);
     } else {
-      postExecutionEvent(port, Actors.SYSTEM, 'task.fail', taskId, verdict.reason || outcome.summary, meta);
+      finishFail(verdict.reason || run.summary, meta);
     }
     return;
   }
@@ -317,8 +538,23 @@ async function runOrchestratedTask(
   // mode === 'plan'
   let plan = (triage.subtasks ?? []).slice(0, MAX_SUBTASKS);
   const outcomes: SubtaskOutcome[] = [];
-  let replans = 0;
   let index = 0;
+
+  const applyReplan = (subtasks: Subtask[], meta: string, label: string): boolean => {
+    if (record.replans >= MAX_REPLANS) return false;
+    record.replans++;
+    plan = subtasks.slice(0, MAX_SUBTASKS);
+    index = 0;
+    postExecutionEvent(
+      port,
+      Actors.SYSTEM,
+      'step.ok',
+      taskId,
+      `${label} (${plan.length} subtasks):\n${plan.map((s, i) => `${i + 1}. ${s.goal}`).join('\n')}`,
+      meta,
+    );
+    return true;
+  };
 
   postExecutionEvent(
     port,
@@ -333,65 +569,34 @@ async function runOrchestratedTask(
     const subtask = plan[index];
     postExecutionEvent(port, Actors.SYSTEM, 'step.ok', taskId, `Subtask ${index + 1}/${plan.length}: ${subtask.goal}`);
 
-    const run = await runSubtask(
-      port,
-      tabId,
-      taskId,
-      `${subtask.goal} (success: ${subtask.success})`,
-      { useLocalValidator: false, allowRespondChat: false, stepPrefix: `[${index + 1}/${plan.length}] ` },
-      signal,
-    );
-    outcomes.push(toOutcome(subtask.goal, run));
+    const { run, goal, replanRequest } = await runWithRescue(subtask, `[${index + 1}/${plan.length}] `);
+    outcomes.push(toOutcome(goal, run));
+
+    if (replanRequest) {
+      if (!applyReplan(replanRequest, '', 'Replanned')) {
+        finishFail('Replan budget exhausted while stuck.', '');
+        return;
+      }
+      continue;
+    }
 
     const { result: verdict, usage } = await checkpoint(task, plan, outcomes, signal);
     const checkpointMeta = track(usage);
     logger.info('checkpoint:', JSON.stringify(verdict).slice(0, 300));
 
     if (verdict.decision === 'done') {
-      postExecutionEvent(
-        port,
-        Actors.ASSISTANT,
-        'task.ok',
-        taskId,
-        verdict.answer || 'Task complete.',
-        `${checkpointMeta} · ${totalMeta()}`,
-      );
+      finishOk(verdict.answer || 'Task complete.', checkpointMeta);
       return;
     }
     if (verdict.decision === 'fail') {
-      postExecutionEvent(
-        port,
-        Actors.SYSTEM,
-        'task.fail',
-        taskId,
-        verdict.reason || 'The orchestrator gave up.',
-        `${checkpointMeta} · ${totalMeta()}`,
-      );
+      finishFail(verdict.reason || 'The orchestrator gave up.', checkpointMeta);
       return;
     }
     if (verdict.decision === 'replan') {
-      if (replans >= MAX_REPLANS || !verdict.subtasks?.length) {
-        postExecutionEvent(
-          port,
-          Actors.SYSTEM,
-          'task.fail',
-          taskId,
-          `Replan budget exhausted. ${verdict.reason ?? ''}`.trim(),
-          `${checkpointMeta} · ${totalMeta()}`,
-        );
+      if (!verdict.subtasks?.length || !applyReplan(verdict.subtasks, checkpointMeta, 'Replanned')) {
+        finishFail(`Replan budget exhausted. ${verdict.reason ?? ''}`.trim(), checkpointMeta);
         return;
       }
-      replans++;
-      plan = verdict.subtasks.slice(0, MAX_SUBTASKS);
-      index = 0;
-      postExecutionEvent(
-        port,
-        Actors.SYSTEM,
-        'step.ok',
-        taskId,
-        `Replanned (${plan.length} subtasks):\n${plan.map((s, i) => `${i + 1}. ${s.goal}`).join('\n')}`,
-        checkpointMeta,
-      );
       continue;
     }
     index++;
@@ -399,18 +604,11 @@ async function runOrchestratedTask(
 
   // Plan ran out without an explicit done — ask for a final verdict
   const { result: final, usage: finalUsage } = await checkpoint(task, plan, outcomes, signal);
-  const finalMeta = `${track(finalUsage)} · ${totalMeta()}`;
+  const finalMeta = track(finalUsage);
   if (final.decision === 'done') {
-    postExecutionEvent(port, Actors.ASSISTANT, 'task.ok', taskId, final.answer || 'Task complete.', finalMeta);
+    finishOk(final.answer || 'Task complete.', finalMeta);
   } else {
-    postExecutionEvent(
-      port,
-      Actors.SYSTEM,
-      'task.fail',
-      taskId,
-      final.reason || 'Plan completed without a confirmed result.',
-      finalMeta,
-    );
+    finishFail(final.reason || 'Plan completed without a confirmed result.', finalMeta);
   }
 }
 
@@ -427,7 +625,8 @@ function toOutcome(goal: string, run: SubtaskRunResult): SubtaskOutcome {
 
 /**
  * Task entry point. Hybrid (orchestrated) when a cloud orchestrator is
- * configured; otherwise the original local-only loop.
+ * configured; otherwise the original local-only loop. Always writes a
+ * TaskRecord (the end-to-end training label).
  */
 export async function runAgentTask(
   port: chrome.runtime.Port,
@@ -437,20 +636,42 @@ export async function runAgentTask(
   signal: AbortSignal,
 ): Promise<void> {
   postExecutionEvent(port, Actors.SYSTEM, 'task.start', taskId);
+  const settings = await chatSettingsStore.getSettings();
+  const record: TaskRecord = {
+    id: crypto.randomUUID(),
+    sessionId: taskId,
+    task,
+    mode: 'local',
+    outcome: 'fail',
+    answer: '',
+    replans: 0,
+    totalCostUsd: 0,
+    cloudCalls: 0,
+    localModel: settings.model,
+    grounderModel: settings.grounderModel,
+    startedAt: Date.now(),
+    endedAt: 0,
+  };
   try {
     if (await isOrchestratorConfigured()) {
-      await runOrchestratedTask(port, tabId, taskId, task, signal);
+      await runOrchestratedTask(port, tabId, taskId, task, record, signal);
     } else {
-      await runLocalTask(port, tabId, taskId, task, signal);
+      await runLocalTask(port, tabId, taskId, task, record, signal);
     }
   } catch (error) {
     await clearHighlights(tabId).catch(() => {});
     if (signal.aborted) {
+      record.outcome = 'cancel';
       postExecutionEvent(port, Actors.SYSTEM, 'task.cancel', taskId, 'Stopped.');
     } else {
       const message = error instanceof Error ? error.message : String(error);
+      record.outcome = 'fail';
+      record.answer = message;
       logger.error('agent task failed:', message);
       postExecutionEvent(port, Actors.SYSTEM, 'task.fail', taskId, message);
     }
+  } finally {
+    record.endedAt = Date.now();
+    trajectoryStore.appendTask(record).catch(error => logger.warning('task record failed:', error));
   }
 }

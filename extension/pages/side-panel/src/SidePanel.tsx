@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { FiSettings } from 'react-icons/fi';
 import { PiPlusBold } from 'react-icons/pi';
 import { GrHistory } from 'react-icons/gr';
-import { type Message, Actors, chatHistoryStore } from '@extension/storage';
+import { type Message, Actors, chatHistoryStore, trajectoryStore } from '@extension/storage';
 import favoritesStorage, { type FavoritePrompt } from '@extension/storage/lib/prompt/favorites';
 import { t } from '@extension/i18n';
 import MessageList from './components/MessageList';
@@ -227,8 +227,110 @@ const SidePanel = () => {
     [stopConnection],
   );
 
+  // Export logged trajectories as training-ready JSONL (runs in the panel:
+  // pages can trigger downloads, the service worker cannot)
+  const handleExport = async () => {
+    try {
+      const sessionIds = await trajectoryStore.getSessionIds();
+      const lines: string[] = [];
+      let plannerExamples = 0;
+      let groundingExamples = 0;
+
+      for (const sessionId of sessionIds) {
+        const [steps, subtasks, tasks] = await Promise.all([
+          trajectoryStore.getSteps(sessionId),
+          trajectoryStore.getSubtasks(sessionId),
+          trajectoryStore.getTasks(sessionId),
+        ]);
+        const subtaskById = new Map(subtasks.map(s => [s.id, s]));
+        const taskById = new Map(tasks.map(t => [t.id, t]));
+
+        for (const task of tasks) {
+          lines.push(JSON.stringify({ type: 'task_record', ...task }));
+        }
+        for (const subtask of subtasks) {
+          lines.push(JSON.stringify({ type: 'subtask_record', ...subtask }));
+        }
+        for (const step of steps) {
+          const subtask = step.subtaskId ? subtaskById.get(step.subtaskId) : undefined;
+          const task = subtask ? taskById.get(subtask.taskRecordId) : undefined;
+          const labels = {
+            action_ok: step.ok,
+            subtask_ok: subtask ? subtask.status === 'ok' : null,
+            task_ok: task ? task.outcome === 'ok' : null,
+          };
+          if (step.decision) {
+            plannerExamples++;
+            lines.push(
+              JSON.stringify({
+                type: 'planner_step',
+                goal: subtask?.goal ?? null,
+                history: step.historyContext ?? [],
+                page: {
+                  url: step.before.url,
+                  title: step.before.title,
+                  scroll: step.before.scroll,
+                  elements: step.before.elements.map(el => {
+                    const kind = el.role && el.role !== el.tag ? `${el.tag}:${el.role}` : el.tag;
+                    return `[${el.index}]<${kind}> ${el.text || el.placeholder || el.href || ''}`.trim();
+                  }),
+                },
+                decision: step.decision,
+                model: step.plannerModel ?? null,
+                error: step.error ?? null,
+                labels,
+                timestamp: step.timestamp,
+              }),
+            );
+          }
+          if (step.action?.type === 'click_at' && step.action.target) {
+            groundingExamples++;
+            lines.push(
+              JSON.stringify({
+                type: 'grounding',
+                screenshot: step.before.screenshot,
+                instruction: step.action.target,
+                x: step.action.x,
+                y: step.action.y,
+                labels,
+                timestamp: step.timestamp,
+              }),
+            );
+          }
+        }
+      }
+
+      const blob = new Blob([lines.join('\n') + '\n'], { type: 'application/jsonl' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `local-browser-use-trajectories-${new Date().toISOString().slice(0, 10)}.jsonl`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+
+      appendMessage({
+        actor: Actors.SYSTEM,
+        content:
+          `Exported ${lines.length} records (${plannerExamples} planner examples, ` +
+          `${groundingExamples} grounding examples) from ${sessionIds.length} sessions.`,
+        timestamp: Date.now(),
+      });
+    } catch (err) {
+      appendMessage({
+        actor: Actors.SYSTEM,
+        content: `Export failed: ${err instanceof Error ? err.message : String(err)}`,
+        timestamp: Date.now(),
+      });
+    }
+  };
+
   // Slash commands drive the perception/executor layer against the active tab
   const handleCommand = async (command: string) => {
+    if (command.trim() === '/export') {
+      appendMessage({ actor: Actors.USER, content: command, timestamp: Date.now() });
+      await handleExport();
+      return;
+    }
     try {
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
       const tabId = tabs[0]?.id;

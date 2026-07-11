@@ -1,5 +1,5 @@
 import type { PerceptionSnapshot } from '@extension/storage';
-import { Actors } from '@extension/storage';
+import { Actors, chatSettingsStore } from '@extension/storage';
 import { createLogger } from '../log';
 import { postExecutionEvent } from '../events';
 import { capturePageState, clearHighlights } from '../perception';
@@ -14,7 +14,17 @@ import {
   formatValidatorTurn,
 } from './prompts';
 import { isOrchestratorConfigured, triageTask, checkpoint } from './orchestrator';
-import type { Subtask, SubtaskOutcome } from './orchestrator';
+import type { Subtask, SubtaskOutcome, CallUsage } from './orchestrator';
+
+function cloudMeta(usage: CallUsage): string {
+  const cost =
+    usage.cost !== null
+      ? `$${usage.cost.toFixed(4)}`
+      : usage.promptTokens !== null
+        ? `${usage.promptTokens}+${usage.completionTokens ?? 0} tok`
+        : 'cost n/a';
+  return `☁ ${usage.model} · ${cost}`;
+}
 
 const logger = createLogger('agent');
 
@@ -80,6 +90,9 @@ async function runSubtask(
   let consecutiveFailures = 0;
   let validationRejections = 0;
   let lastState: PerceptionSnapshot | null = null;
+  const { model: localModel, grounderModel } = await chatSettingsStore.getSettings();
+  const plannerMeta = `⌂ ${localModel} (local) · $0`;
+  const grounderMeta = `⌂ ${grounderModel.split('/').pop()} (local) · $0`;
 
   const finish = (status: 'ok' | 'fail', summary: string): SubtaskRunResult => ({
     status,
@@ -127,7 +140,14 @@ async function runSubtask(
           if (!verdict.valid) {
             validationRejections++;
             history.push(`done rejected by validator: ${verdict.reason}`);
-            postExecutionEvent(port, Actors.SYSTEM, 'step.ok', taskId, `Validator: not done — ${verdict.reason}`);
+            postExecutionEvent(
+              port,
+              Actors.SYSTEM,
+              'step.ok',
+              taskId,
+              `Validator: not done — ${verdict.reason}`,
+              plannerMeta,
+            );
             continue;
           }
         }
@@ -143,6 +163,7 @@ async function runSubtask(
           'step.ok',
           taskId,
           `${prefix}Step ${step}: locating "${decision.target}" visually — ${decision.reasoning}`,
+          grounderMeta,
         );
         // Highlights would pollute the grounder's screenshot
         await clearHighlights(tabId).catch(() => {});
@@ -193,6 +214,7 @@ async function runSubtask(
         'step.ok',
         taskId,
         `${prefix}Step ${step}: ${summarizable(decision)} — ${decision.reasoning}`,
+        plannerMeta,
       );
 
       const result = await executeAction(tabId, taskId, action, state);
@@ -232,10 +254,12 @@ async function runLocalTask(
     signal,
   );
   if (outcome.status === 'streamed') return; // chat path posted its own events
+  const { model } = await chatSettingsStore.getSettings();
+  const meta = `⌂ ${model} (local) · task total $0`;
   if (outcome.status === 'ok') {
-    postExecutionEvent(port, Actors.ASSISTANT, 'task.ok', taskId, outcome.summary);
+    postExecutionEvent(port, Actors.ASSISTANT, 'task.ok', taskId, outcome.summary, meta);
   } else {
-    postExecutionEvent(port, Actors.SYSTEM, 'task.fail', taskId, outcome.summary);
+    postExecutionEvent(port, Actors.SYSTEM, 'task.fail', taskId, outcome.summary, meta);
   }
 }
 
@@ -247,11 +271,25 @@ async function runOrchestratedTask(
   task: string,
   signal: AbortSignal,
 ): Promise<void> {
-  const triage = await triageTask(task, signal);
+  // Running tally of cloud spend for the end-of-task total
+  let cloudCost = 0;
+  let cloudCalls = 0;
+  let costKnown = true;
+  const track = (usage: CallUsage): string => {
+    cloudCalls++;
+    if (usage.cost !== null) cloudCost += usage.cost;
+    else costKnown = false;
+    return cloudMeta(usage);
+  };
+  const totalMeta = () =>
+    `task total ${costKnown ? '' : '≥'}$${cloudCost.toFixed(4)} · ${cloudCalls} cloud call${cloudCalls === 1 ? '' : 's'}`;
+
+  const { result: triage, usage: triageUsage } = await triageTask(task, signal);
+  const triageMeta = track(triageUsage);
   logger.info('triage:', JSON.stringify(triage).slice(0, 300));
 
   if (triage.mode === 'chat') {
-    postExecutionEvent(port, Actors.ASSISTANT, 'task.ok', taskId, triage.reply || '');
+    postExecutionEvent(port, Actors.ASSISTANT, 'task.ok', taskId, triage.reply || '', `${triageMeta} · ${totalMeta()}`);
     return;
   }
 
@@ -266,11 +304,12 @@ async function runOrchestratedTask(
       signal,
     );
     const plan: Subtask[] = [{ goal: task, success: 'the task is complete' }];
-    const verdict = await checkpoint(task, plan, [toOutcome(task, outcome)], signal);
+    const { result: verdict, usage } = await checkpoint(task, plan, [toOutcome(task, outcome)], signal);
+    const meta = `${track(usage)} · ${totalMeta()}`;
     if (verdict.decision === 'done' || (verdict.decision === 'continue' && outcome.status === 'ok')) {
-      postExecutionEvent(port, Actors.ASSISTANT, 'task.ok', taskId, verdict.answer || outcome.summary);
+      postExecutionEvent(port, Actors.ASSISTANT, 'task.ok', taskId, verdict.answer || outcome.summary, meta);
     } else {
-      postExecutionEvent(port, Actors.SYSTEM, 'task.fail', taskId, verdict.reason || outcome.summary);
+      postExecutionEvent(port, Actors.SYSTEM, 'task.fail', taskId, verdict.reason || outcome.summary, meta);
     }
     return;
   }
@@ -287,17 +326,12 @@ async function runOrchestratedTask(
     'step.ok',
     taskId,
     `Plan (${plan.length} subtasks):\n${plan.map((s, i) => `${i + 1}. ${s.goal}`).join('\n')}`,
+    triageMeta,
   );
 
   while (index < plan.length && outcomes.length < MAX_SUBTASKS + MAX_REPLANS * 2) {
     const subtask = plan[index];
-    postExecutionEvent(
-      port,
-      Actors.SYSTEM,
-      'step.ok',
-      taskId,
-      `Subtask ${index + 1}/${plan.length}: ${subtask.goal}`,
-    );
+    postExecutionEvent(port, Actors.SYSTEM, 'step.ok', taskId, `Subtask ${index + 1}/${plan.length}: ${subtask.goal}`);
 
     const run = await runSubtask(
       port,
@@ -309,15 +343,30 @@ async function runOrchestratedTask(
     );
     outcomes.push(toOutcome(subtask.goal, run));
 
-    const verdict = await checkpoint(task, plan, outcomes, signal);
+    const { result: verdict, usage } = await checkpoint(task, plan, outcomes, signal);
+    const checkpointMeta = track(usage);
     logger.info('checkpoint:', JSON.stringify(verdict).slice(0, 300));
 
     if (verdict.decision === 'done') {
-      postExecutionEvent(port, Actors.ASSISTANT, 'task.ok', taskId, verdict.answer || 'Task complete.');
+      postExecutionEvent(
+        port,
+        Actors.ASSISTANT,
+        'task.ok',
+        taskId,
+        verdict.answer || 'Task complete.',
+        `${checkpointMeta} · ${totalMeta()}`,
+      );
       return;
     }
     if (verdict.decision === 'fail') {
-      postExecutionEvent(port, Actors.SYSTEM, 'task.fail', taskId, verdict.reason || 'The orchestrator gave up.');
+      postExecutionEvent(
+        port,
+        Actors.SYSTEM,
+        'task.fail',
+        taskId,
+        verdict.reason || 'The orchestrator gave up.',
+        `${checkpointMeta} · ${totalMeta()}`,
+      );
       return;
     }
     if (verdict.decision === 'replan') {
@@ -328,6 +377,7 @@ async function runOrchestratedTask(
           'task.fail',
           taskId,
           `Replan budget exhausted. ${verdict.reason ?? ''}`.trim(),
+          `${checkpointMeta} · ${totalMeta()}`,
         );
         return;
       }
@@ -340,6 +390,7 @@ async function runOrchestratedTask(
         'step.ok',
         taskId,
         `Replanned (${plan.length} subtasks):\n${plan.map((s, i) => `${i + 1}. ${s.goal}`).join('\n')}`,
+        checkpointMeta,
       );
       continue;
     }
@@ -347,9 +398,10 @@ async function runOrchestratedTask(
   }
 
   // Plan ran out without an explicit done — ask for a final verdict
-  const final = await checkpoint(task, plan, outcomes, signal);
+  const { result: final, usage: finalUsage } = await checkpoint(task, plan, outcomes, signal);
+  const finalMeta = `${track(finalUsage)} · ${totalMeta()}`;
   if (final.decision === 'done') {
-    postExecutionEvent(port, Actors.ASSISTANT, 'task.ok', taskId, final.answer || 'Task complete.');
+    postExecutionEvent(port, Actors.ASSISTANT, 'task.ok', taskId, final.answer || 'Task complete.', finalMeta);
   } else {
     postExecutionEvent(
       port,
@@ -357,6 +409,7 @@ async function runOrchestratedTask(
       'task.fail',
       taskId,
       final.reason || 'Plan completed without a confirmed result.',
+      finalMeta,
     );
   }
 }

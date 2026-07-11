@@ -91,7 +91,7 @@ export async function streamChatReply(
       }
     }
 
-    postExecutionEvent(port, Actors.ASSISTANT, 'task.ok', taskId, fullText);
+    postExecutionEvent(port, Actors.ASSISTANT, 'task.ok', taskId, fullText, `⌂ ${model} (local) · $0`);
   } catch (error) {
     if (signal.aborted) {
       postExecutionEvent(port, Actors.SYSTEM, 'task.cancel', taskId, 'Stopped.');

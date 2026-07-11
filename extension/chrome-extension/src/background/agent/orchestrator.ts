@@ -87,7 +87,20 @@ export async function isOrchestratorConfigured(): Promise<boolean> {
   return Boolean(settings.orchestratorEnabled && settings.orchestratorApiKey && settings.orchestratorBaseUrl);
 }
 
-async function callOrchestrator<T>(systemPrompt: string, userContent: string, signal: AbortSignal): Promise<T> {
+/** Attribution for one cloud call: model used and USD cost when reported */
+export interface CallUsage {
+  model: string;
+  /** USD, when the provider reports it (OpenRouter usage accounting) */
+  cost: number | null;
+  promptTokens: number | null;
+  completionTokens: number | null;
+}
+
+async function callOrchestrator<T>(
+  systemPrompt: string,
+  userContent: string,
+  signal: AbortSignal,
+): Promise<{ value: T; usage: CallUsage }> {
   const { orchestratorBaseUrl, orchestratorApiKey, orchestratorModel } = await chatSettingsStore.getSettings();
   const response = await fetch(`${orchestratorBaseUrl.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
@@ -105,6 +118,8 @@ async function callOrchestrator<T>(systemPrompt: string, userContent: string, si
         { role: 'user', content: userContent },
       ],
       temperature: 0.2,
+      // OpenRouter usage accounting: response.usage.cost in USD (ignored elsewhere)
+      usage: { include: true },
     }),
     signal,
   });
@@ -116,19 +131,32 @@ async function callOrchestrator<T>(systemPrompt: string, userContent: string, si
   if (data.error) throw new Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error));
   const content: string = data.choices?.[0]?.message?.content ?? '';
   logger.info('orchestrator response:', content.slice(0, 300));
-  return parseJsonObject<T>(content);
+  const usage: CallUsage = {
+    model: data.model ?? orchestratorModel,
+    cost: typeof data.usage?.cost === 'number' ? data.usage.cost : null,
+    promptTokens: data.usage?.prompt_tokens ?? null,
+    completionTokens: data.usage?.completion_tokens ?? null,
+  };
+  return { value: parseJsonObject<T>(content), usage };
 }
 
-export async function triageTask(task: string, signal: AbortSignal): Promise<TriageResult> {
-  const result = await callOrchestrator<TriageResult>(TRIAGE_SYSTEM_PROMPT, `TASK: ${task}`, signal);
+export async function triageTask(
+  task: string,
+  signal: AbortSignal,
+): Promise<{ result: TriageResult; usage: CallUsage }> {
+  const { value: result, usage } = await callOrchestrator<TriageResult>(
+    TRIAGE_SYSTEM_PROMPT,
+    `TASK: ${task}`,
+    signal,
+  );
   if (!['chat', 'execute', 'plan'].includes(result.mode)) {
     throw new Error(`Orchestrator returned invalid mode: ${String(result.mode)}`);
   }
   if (result.mode === 'plan' && (!Array.isArray(result.subtasks) || result.subtasks.length === 0)) {
     // A plan with no subtasks degrades to direct execution
-    return { mode: 'execute' };
+    return { result: { mode: 'execute' }, usage };
   }
-  return result;
+  return { result, usage };
 }
 
 export async function checkpoint(
@@ -136,14 +164,18 @@ export async function checkpoint(
   plan: Subtask[],
   outcomes: SubtaskOutcome[],
   signal: AbortSignal,
-): Promise<CheckpointResult> {
+): Promise<{ result: CheckpointResult; usage: CallUsage }> {
   const userContent =
     `TASK: ${task}\n\n` +
     `PLAN:\n${plan.map((s, i) => `${i + 1}. ${s.goal} (success: ${s.success})`).join('\n')}\n\n` +
     `OUTCOMES SO FAR (JSON):\n${JSON.stringify(outcomes, null, 1)}`;
-  const result = await callOrchestrator<CheckpointResult>(CHECKPOINT_SYSTEM_PROMPT, userContent, signal);
+  const { value: result, usage } = await callOrchestrator<CheckpointResult>(
+    CHECKPOINT_SYSTEM_PROMPT,
+    userContent,
+    signal,
+  );
   if (!['continue', 'replan', 'done', 'fail'].includes(result.decision)) {
     throw new Error(`Orchestrator returned invalid decision: ${String(result.decision)}`);
   }
-  return result;
+  return { result, usage };
 }

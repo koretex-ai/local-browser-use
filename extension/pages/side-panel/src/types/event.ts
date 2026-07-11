@@ -33,6 +33,8 @@ export interface EventData {
   maxSteps: number;
   /** details is the content of the event */
   details: string;
+  /** attribution line: which model produced this and what it cost */
+  meta?: string;
 }
 
 export interface AgentEvent {

@@ -68,6 +68,7 @@ const SidePanel = () => {
     (event: AgentEvent) => {
       const { actor, state, timestamp, data } = event;
       const content = data?.details ?? '';
+      const meta = data?.meta;
 
       switch (state) {
         case ExecutionState.TASK_START:
@@ -80,6 +81,7 @@ const SidePanel = () => {
             actor: Actors.SYSTEM,
             content,
             timestamp,
+            meta,
           });
           setStreamingText('');
           break;
@@ -90,6 +92,7 @@ const SidePanel = () => {
             actor: Actors.ASSISTANT,
             content,
             timestamp,
+            meta,
           });
           break;
         case ExecutionState.TASK_FAIL:
@@ -99,6 +102,7 @@ const SidePanel = () => {
             actor: Actors.SYSTEM,
             content: content || t('errors_unknown'),
             timestamp,
+            meta,
           });
           break;
         case ExecutionState.TASK_CANCEL:

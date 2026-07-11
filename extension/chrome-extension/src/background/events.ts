@@ -9,13 +9,14 @@ export function postExecutionEvent(
   state: string,
   taskId: string,
   details = '',
+  meta?: string,
 ) {
   try {
     port.postMessage({
       type: 'execution',
       actor,
       state,
-      data: { taskId, step: 0, maxSteps: 0, details },
+      data: { taskId, step: 0, maxSteps: 0, details, meta },
       timestamp: Date.now(),
     });
   } catch (error) {

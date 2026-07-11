@@ -10,6 +10,8 @@ export interface Message {
   timestamp: number; // Unix timestamp in milliseconds
   /** Optional data-URL image rendered below the content (e.g. screenshots) */
   image?: string;
+  /** Optional attribution line: which model produced this and what it cost */
+  meta?: string;
 }
 
 export interface ChatMessage extends Message {

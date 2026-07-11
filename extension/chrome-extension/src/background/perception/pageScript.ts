@@ -212,6 +212,12 @@ export function clickElementByIndex(index: number): { ok: boolean; error?: strin
     recovered = true;
   }
 
+  // Clicking a disabled control is a silent no-op — report it as a failure
+  // so the planner reacts instead of assuming success
+  if ((el as HTMLButtonElement).disabled || el.getAttribute('aria-disabled') === 'true') {
+    return { ok: false, error: `Element at index ${index} is disabled — its precondition is not met yet` };
+  }
+
   el.scrollIntoView({ block: 'center', behavior: 'instant' as ScrollBehavior });
   const rect = el.getBoundingClientRect();
   const cx = rect.left + rect.width / 2;
@@ -253,8 +259,20 @@ export function typeIntoElement(index: number, text: string): { ok: boolean; err
   }
 
   if (el.isContentEditable) {
-    el.textContent = text;
-    el.dispatchEvent(new Event('input', { bubbles: true }));
+    // Rich-text editors (LinkedIn, Quill, ProseMirror) ignore textContent
+    // writes — they need real editing commands that fire beforeinput/input
+    const selection = window.getSelection();
+    if (selection) {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+    const inserted = document.execCommand('insertText', false, text);
+    if (!inserted || (el.textContent ?? '').trim() === '') {
+      el.textContent = text;
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+    }
     return { ok: true };
   }
 

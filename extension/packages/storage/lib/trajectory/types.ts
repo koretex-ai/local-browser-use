@@ -12,7 +12,16 @@ export type Action =
   // (screenshot, target, x, y) tuples are grounder training data.
   | { type: 'click_at'; x: number; y: number; target?: string }
   | { type: 'type'; index: number; text: string }
+  // Read information from the page text; the answer is produced by an LLM
+  // call over the extracted text and fed back into the planner's HISTORY
+  | { type: 'extract'; query: string }
   | { type: 'scroll'; direction: 'up' | 'down'; amount?: number }
+  // Keyboard press on the focused element, e.g. "Enter" to submit a search
+  // box that has no button, "Escape" to close a dialog
+  | { type: 'key'; combo: string }
+  // Trusted CDP keyboard input into whatever has focus — the only way to
+  // type into canvas editors (Google Docs/Sheets) that ignore synthetic events
+  | { type: 'type_focused'; text: string }
   | { type: 'navigate'; url: string }
   | { type: 'back' }
   | { type: 'done'; message: string };
@@ -37,6 +46,8 @@ export interface PerceptionSnapshot {
   title: string;
   scroll: { x: number; y: number; pageHeight: number; viewportHeight: number };
   elements: InteractiveElement[];
+  /** Readable page text, viewport-first (capped; absent on older records) */
+  pageText?: string;
   /** Downscaled JPEG data URL of the visible viewport */
   screenshot: string;
   capturedAt: number;
@@ -61,6 +72,12 @@ export interface TrajectoryStep {
   decision?: unknown;
   /** Model that produced the decision */
   plannerModel?: string;
+  /**
+   * Escalation tier that produced this step: 0 = local planner, 1/2 = cloud
+   * fallback. Escalated steps are strong-model actions on pages where the
+   * local model failed — priority SFT data for the flywheel.
+   */
+  plannerTier?: number;
   /** The HISTORY lines the planner saw when deciding (its input context) */
   historyContext?: string[];
 }
@@ -79,6 +96,10 @@ export interface SubtaskRecord {
   stepsCount: number;
   /** Who authored this goal */
   plannedBy: 'orchestrator' | 'user';
+  /** Escalation tier the subtask ran at (0 = local planner, 1/2 = cloud) */
+  plannerTier?: number;
+  /** Planner model that drove this subtask */
+  plannerModel?: string;
   startedAt: number;
   endedAt: number;
 }

@@ -173,6 +173,92 @@ export function removeHighlights(): void {
   document.getElementById('__lbu_highlights')?.remove();
 }
 
+// Extract readable page text, viewport-first: text visible in the current
+// viewport fills the budget before below/above-fold text, so under a tight
+// char cap the planner reads what the screenshot shows. Interactive-element
+// labels alone miss most page content (prices, table cells, article text) —
+// this is the non-interactive complement to set-of-marks.
+export function extractPageText(maxChars: number): string {
+  const vh = window.innerHeight;
+
+  // Preserve content-block boundaries as line breaks: posts/cards/rows are
+  // delimited by STANDARD semantics (article, listitem, tr, ...), so authors
+  // and their content stay together on one line and adjacent posts don't
+  // bleed into each other (misattribution root cause). Generic by design —
+  // no site-specific selectors.
+  // Card-level containers first (a post's author + content must land on ONE
+  // line even when they sit in different paragraphs inside the card); only
+  // pages without card semantics fall back to paragraph-level blocks.
+  const CARD_SELECTOR = 'article, [role="article"], li, [role="listitem"], tr';
+  const FINE_SELECTOR = 'blockquote, section, h1, h2, h3, h4, h5, h6, p';
+  interface Bucket {
+    lines: string[];
+    current: string[];
+    lastBlock: Element | null;
+  }
+  const makeBucket = (): Bucket => ({ lines: [], current: [], lastBlock: null });
+  const flush = (bucket: Bucket) => {
+    if (bucket.current.length) {
+      bucket.lines.push(bucket.current.join(' '));
+      bucket.current = [];
+    }
+  };
+  const push = (bucket: Bucket, text: string, block: Element | null) => {
+    if (block !== bucket.lastBlock) {
+      flush(bucket);
+      bucket.lastBlock = block;
+    }
+    bucket.current.push(text);
+  };
+  const inView = makeBucket();
+  const offView = makeBucket();
+
+  const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'SVG', 'IFRAME']);
+
+  const visit = (root: Node): void => {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+      acceptNode: node => {
+        if (node instanceof Element) {
+          if (SKIP_TAGS.has(node.tagName.toUpperCase()) || node.id === '__lbu_highlights')
+            return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_SKIP; // descend, but elements themselves yield nothing
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    // Recurse into open shadow roots (walker does not descend into them)
+    const shadowHosts = (root instanceof Element || root instanceof Document || root instanceof ShadowRoot
+      ? Array.from((root as Element).querySelectorAll?.('*') ?? [])
+      : []
+    ).filter(el => (el as Element).shadowRoot) as Element[];
+
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      const text = node.textContent?.replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+      const el = node.parentElement;
+      if (!el) continue;
+      const style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) continue;
+      const block = el.closest(CARD_SELECTOR) ?? el.closest(FINE_SELECTOR);
+      push(rect.bottom >= 0 && rect.top <= vh ? inView : offView, text, block);
+    }
+    for (const host of shadowHosts) visit(host.shadowRoot as ShadowRoot);
+  };
+  visit(document.body);
+  flush(inView);
+  flush(offView);
+
+  const visible = inView.lines.join('\n');
+  if (visible.length >= maxChars) return visible.slice(0, maxChars) + '…';
+  const rest = offView.lines.join('\n');
+  if (!rest) return visible;
+  const remaining = maxChars - visible.length;
+  return `${visible}\n[off-screen] ${rest.slice(0, remaining)}${rest.length > remaining ? '…' : ''}`;
+}
+
 // Click the element registered at the given index by the last extraction.
 // If the ref went stale (SPA re-rendered between perceive and act), recover
 // by hit-testing the element's remembered position.
@@ -328,6 +414,73 @@ export function clickAtPoint(x: number, y: number): { ok: boolean; error?: strin
     .replace(/\s+/g, ' ')
     .slice(0, 60);
   return { ok: true, hit: `<${el.tagName.toLowerCase()}> ${label}`.trim() };
+}
+
+// Press a keyboard key (optionally with modifiers, e.g. "Enter", "Escape",
+// "Ctrl+A") on the currently focused element. SPAs (X, LinkedIn) handle
+// keydown themselves; for plain HTML forms an unhandled Enter falls back to
+// native form submission.
+export function pressKey(combo: string): { ok: boolean; error?: string; target?: string } {
+  const parts = combo
+    .split('+')
+    .map(s => s.trim())
+    .filter(Boolean);
+  const rawKey = parts.pop() ?? '';
+  if (!rawKey) return { ok: false, error: 'key requires a key name, e.g. "Enter"' };
+  const mods = new Set(parts.map(p => p.toLowerCase()));
+
+  const NAMED: Record<string, string> = {
+    enter: 'Enter',
+    return: 'Enter',
+    escape: 'Escape',
+    esc: 'Escape',
+    tab: 'Tab',
+    space: ' ',
+    backspace: 'Backspace',
+    delete: 'Delete',
+    arrowup: 'ArrowUp',
+    arrowdown: 'ArrowDown',
+    arrowleft: 'ArrowLeft',
+    arrowright: 'ArrowRight',
+    pageup: 'PageUp',
+    pagedown: 'PageDown',
+    home: 'Home',
+    end: 'End',
+  };
+  const key = NAMED[rawKey.toLowerCase()] ?? rawKey;
+  const code =
+    key === ' ' ? 'Space' : key.length === 1 ? (/[a-z]/i.test(key) ? `Key${key.toUpperCase()}` : `Digit${key}`) : key;
+
+  const target = (document.activeElement as HTMLElement | null) ?? document.body;
+  const init: KeyboardEventInit = {
+    key,
+    code,
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    ctrlKey: mods.has('ctrl') || mods.has('control'),
+    metaKey: mods.has('cmd') || mods.has('meta'),
+    altKey: mods.has('alt') || mods.has('option'),
+    shiftKey: mods.has('shift'),
+  };
+  const unprevented = target.dispatchEvent(new KeyboardEvent('keydown', init));
+  target.dispatchEvent(new KeyboardEvent('keypress', init));
+  target.dispatchEvent(new KeyboardEvent('keyup', init));
+
+  // Synthetic events never trigger native form submission — do it explicitly
+  // when the page did not handle the keydown itself
+  if (key === 'Enter' && unprevented) {
+    const form = (target as HTMLInputElement).form;
+    if (form) {
+      try {
+        form.requestSubmit();
+      } catch {
+        form.submit();
+      }
+    }
+  }
+  const label = (target.getAttribute?.('aria-label') || target.tagName || 'page').toString().slice(0, 40);
+  return { ok: true, target: label };
 }
 
 // Report viewport CSS size (for scaling grounder image coordinates)

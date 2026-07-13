@@ -1,6 +1,6 @@
 import type { PerceptionSnapshot } from '@extension/storage';
 import { createLogger } from '../log';
-import { extractInteractiveElements, removeHighlights } from './pageScript';
+import { extractInteractiveElements, extractPageText, removeHighlights } from './pageScript';
 import type { ExtractedPageState } from './pageScript';
 
 const logger = createLogger('perception');
@@ -14,6 +14,11 @@ const SCREENSHOT_JPEG_QUALITY = 0.7;
 // space and every click lands progressively below/right of the target
 // (measured 2026-07-10: +180px y-error at 1024w vs <=10px at 1280w).
 export const GROUNDER_SCREENSHOT_OPTS = { maxWidth: 1280, quality: 0.85 };
+
+// Page-text budgets: the snapshot carries a digest every step (planner
+// observation); the extract action re-reads with a much larger budget.
+const SNAPSHOT_PAGE_TEXT_CHARS = 4000;
+const EXTRACT_PAGE_TEXT_CHARS = 16000;
 
 async function runInPage<Args extends unknown[], Result>(
   tabId: number,
@@ -86,18 +91,29 @@ export async function capturePageState(tabId: number, showHighlights: boolean): 
   const dom: ExtractedPageState = await runInPage(tabId, extractInteractiveElements, showHighlights);
   if (!dom) throw new Error('DOM extraction returned no result — is this a restricted page (chrome://, Web Store)?');
 
+  const pageText = await runInPage(tabId, extractPageText, SNAPSHOT_PAGE_TEXT_CHARS).catch(error => {
+    logger.warning('page text extraction failed:', error);
+    return '';
+  });
   const screenshot = await captureScreenshot(tabId);
-  logger.info('captured page state', dom.url, `${dom.elements.length} elements`);
+  logger.info('captured page state', dom.url, `${dom.elements.length} elements, ${pageText.length} text chars`);
 
   lastSnapshot = {
     url: dom.url,
     title: dom.title,
     scroll: dom.scroll,
     elements: dom.elements,
+    pageText,
     screenshot: screenshot.dataUrl,
     capturedAt: Date.now(),
   };
   return lastSnapshot;
+}
+
+/** Full-budget page text for the extract action (never leaves the machine
+ * unless the cloud-executor fallback is enabled). */
+export async function capturePageText(tabId: number): Promise<string> {
+  return runInPage(tabId, extractPageText, EXTRACT_PAGE_TEXT_CHARS);
 }
 
 export async function clearHighlights(tabId: number): Promise<void> {
